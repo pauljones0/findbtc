@@ -19,14 +19,14 @@ completely solve the pain point?"**
 
 | # | Goal | Status | Done commit |
 |---|------|--------|-------------|
-| 1 | Scan triage report | complete | (uncommitted — awaiting user's commit) |
-| 2 | Crack-ready export for encrypted wallets | complete | (uncommitted — awaiting user's commit) |
-| 3 | Fuzzy / partial BIP39 finder | complete | (uncommitted — awaiting user's commit) |
-| 4 | Fragment-aware salvage | complete | (uncommitted — awaiting user's commit) |
-| 5 | Watch-only balance triage | complete | (uncommitted — awaiting user's commit) |
-| 6 | More wallet formats by demand | complete | (uncommitted — awaiting user's commit) |
-| 7 | Filesystem-aware layer | complete | (uncommitted — awaiting user's commit) |
-| 8 | Forensics packaging | complete | (uncommitted — awaiting user's commit) |
+| 1 | Scan triage report | complete | a06a5c8 |
+| 2 | Crack-ready export for encrypted wallets | complete | a06a5c8 |
+| 3 | Fuzzy / partial BIP39 finder | complete | a06a5c8 |
+| 4 | Fragment-aware salvage | complete | a06a5c8 |
+| 5 | Watch-only balance triage | complete | a06a5c8 |
+| 6 | More wallet formats by demand | complete | a06a5c8 |
+| 7 | Filesystem-aware layer | complete | a06a5c8 |
+| 8 | Forensics packaging | complete | a06a5c8 |
 
 ## Global done criteria (every goal)
 
@@ -241,5 +241,5 @@ available; tampered source detected via hash; gates.
 
 Commits and pushes need the user's explicit ask in the session (per Git
 safety rules). The chain rule's "done commit" column may read
-`(uncommitted — awaiting user's commit)` when no commit was requested;
+`a06a5c8` when no commit was requested;
 that never blocks picking up the next goal.
