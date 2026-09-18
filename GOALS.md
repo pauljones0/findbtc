@@ -241,5 +241,5 @@ available; tampered source detected via hash; gates.
 
 Commits and pushes need the user's explicit ask in the session (per Git
 safety rules). The chain rule's "done commit" column may read
-`a06a5c8` when no commit was requested;
+`(uncommitted — awaiting user's commit)` when no commit was requested;
 that never blocks picking up the next goal.
