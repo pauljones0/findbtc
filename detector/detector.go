@@ -58,11 +58,13 @@ func trimEdgeFragments(data []byte, first, final bool, isWordChar func(byte) boo
 
 // scanOverlap returns how many trailing bytes of each block are prepended to
 // the next one: one less than the longest pattern any stage searches for,
-// including the widest seed phrase and keystore spans.
+// including the widest seed phrase, keystore, and Goal 6 format spans.
 func scanOverlap() int {
 	max := bip39MaxSpan + 1
-	if keystoreMaxSpan+1 > max {
-		max = keystoreMaxSpan + 1
+	for _, span := range []int{keystoreMaxSpan, electrumMaxSpan, electrumFileMaxSpan, descriptorMaxSpan, slip39MaxSpan, metamaskMaxSpan} {
+		if span+1 > max {
+			max = span + 1
+		}
 	}
 	patterns := append(append([][]byte{}, needles...), ZIP_ECD_HEADER, GZIP_HEADER)
 	for _, p := range patterns {
@@ -97,6 +99,18 @@ type Detection struct {
 	CarvePath string `json:"carve_path,omitempty"`
 	// Carve classifies the carved bytes; set only when carving succeeded.
 	Carve *CarveInfo `json:"carve,omitempty"`
+	// Hashes holds crack-ready password material extracted from the carve;
+	// set only when carving found usable mkey or keystore records.
+	Hashes []CrackHash `json:"hashes,omitempty"`
+	// Words holds seed-phrase words for BIP39 hits; set only with Reveal
+	// (--reveal), otherwise words never leave the detector.
+	Words []string `json:"words,omitempty"`
+	// FileName names the filesystem entry holding the hit; set only by
+	// filesystem-guided (-fs) scans, never by raw scans.
+	FileName string `json:"file_name,omitempty"`
+	// Salvage describes reassembled database pages from the carve; set only
+	// when salvage wrote a .salvage.db file.
+	Salvage *SalvageInfo `json:"salvage,omitempty"`
 }
 
 type ProgressInfo struct {
@@ -177,6 +191,20 @@ type Options struct {
 	// CheckpointPath, when non-empty, journals root-target progress to the
 	// file every 1MB and on completion, so an interrupted scan can resume.
 	CheckpointPath string
+	// Reveal, when true, attaches seed-phrase words to BIP39 detections
+	// (owner recovery only). Default output never contains words.
+	Reveal bool
+	// CaseLogPath, when non-empty, appends one JSON record per scan to
+	// the file: source identity, streaming SHA-256/MD5 over the bytes
+	// actually read, skipped ranges, and the detection count.
+	CaseLogPath string
+	// ToolVersion stamps the case log; main sets it from the build.
+	ToolVersion string
+	// Flags records the invocation arguments in the case log; main sets
+	// it so a reviewer can reproduce the scan exactly.
+	Flags []string
+	// caseRec carries the active recorder from runPipeline to scanBlocks.
+	caseRec *caseRecorder
 }
 
 // BadSectorFunc reports an unreadable byte range [start, end) in a target.
@@ -199,8 +227,56 @@ func Scan(startOffset int64, path string, onDetection func(Detection), onProgres
 // Bootstrap and run the detection system, scanning the given path
 // for remnants of wallets. Normally, the path given would
 // be a raw device file handle, like /dev/sdb or some such; the system
-// would then scan every sector of that device
+// would then scan every sector of that device. Forensic images are
+// accepted too: EnCase E01 sets (pass the .E01) decode transparently,
+// and split raw sets (base.001, base.002, ...) concatenate.
 func ScanWithOptions(startOffset int64, path string, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("cannot scan %s: %w", path, err)
+	}
+	if opts.CarveDir != "" {
+		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
+			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+		}
+	}
+	target, err := detectScanTarget(path, startOffset)
+	if err != nil {
+		return err
+	}
+	return runPipeline(target, opts, onDetection, onProgress)
+}
+
+// ScanRangesWithOptions scans isolated byte ranges of one file (filesystem
+// unallocated extents, deleted-file runs) as sequential pipelines: the
+// completion protocol assumes a single root target, so ranges cannot share
+// one. Checkpointing is refused: a single offset cannot resume a range
+// list. Carves near range edges clamp to the range.
+func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("cannot scan %s: %w", path, err)
+	}
+	if opts.CarveDir != "" {
+		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
+			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+		}
+	}
+	if opts.CheckpointPath != "" {
+		return fmt.Errorf("checkpointing is not supported for range scans")
+	}
+	for _, r := range ranges {
+		if r.Len <= 0 {
+			continue
+		}
+		t := &boundedScanTarget{path: path, start: r.Start, length: r.Len}
+		if err := runPipeline(t, opts, onDetection, onProgress); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// runPipeline runs one scan target through the full detection pipeline.
+func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	// Shutdown is coordinated through ctx: when the final EOF reaches
 	// detectWallets it reports completion, Scan returns, and the deferred
 	// cancel below tells every pipeline stage to exit. Channels are never
@@ -208,12 +284,21 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("cannot scan %s: %w", path, err)
-	}
-	if opts.CarveDir != "" {
-		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
-			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+	var rec *caseRecorder
+	if opts.CaseLogPath != "" {
+		rec = newCaseRecorder(seed, opts.ToolVersion, opts.Flags, opts.CheckpointPath)
+		opts.caseRec = rec
+		userDetect := onDetection
+		onDetection = func(d Detection) {
+			rec.noteDetection()
+			userDetect(d)
+		}
+		userBad := opts.OnBadSector
+		opts.OnBadSector = func(target string, start, end int64, err error) {
+			rec.noteSkipped(target, start, end, err)
+			if userBad != nil {
+				userBad(target, start, end, err)
+			}
 		}
 	}
 
@@ -248,16 +333,22 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 
 	// 3. And, finally, pass raw and uncompressed blocks both to wallet detection
 	go detectWallets(walletDetectionQueue, emptyBlocks, onDetection, onComplete,
-		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes})
+		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes}, opts.Reveal)
 
-	// Publish the source file as the first target to scan
-	scanTargets <- &fileScanTarget{
-		startOffset: startOffset,
-		path:        path,
-	}
+	// Publish the seed target to scan
+	scanTargets <- seed
 
 	// Wait for system to signal outcome
 	signal := <-signals
+	if rec != nil {
+		status, runErr := "complete", error(nil)
+		if signal != io.EOF {
+			status, runErr = "error", signal
+		}
+		if err := appendCaseLog(opts.CaseLogPath, rec.finish(status, runErr)); err != nil {
+			return fmt.Errorf("case log: %w", err)
+		}
+	}
 	if signal == io.EOF {
 		return nil
 	}
@@ -369,6 +460,11 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 			block.length = prefix + read
 			block.overlap = prefix
 			block.offset = currentOffset - int64(prefix)
+			if opts.caseRec != nil && checkpointRoot {
+				// Only the newly read bytes: the overlap prefix was
+				// hashed with the previous block, skipped ranges never.
+				opts.caseRec.hash(block.data[prefix : prefix+read])
+			}
 			block.final = isCleanEnd(err)
 			block.location = fmt.Sprintf("%s in %dkB block at byte offset %d", target.Describe(), blockSize/1024, currentOffset)
 			block.source = target
@@ -489,6 +585,14 @@ var needles = [][]byte{
 	// Also worth looking for the standard wallet file name; it might appear both in inodes and in zip file indexes
 	[]byte("wallet.dat"),
 
+	// Lightning (lnd): channel.db is bbolt with these bucket names; the
+	// .backup file itself is chacha20-encrypted (no content magic), so its
+	// file name is the only signal, found in directory entries.
+	[]byte("channel.backup"),
+	[]byte("channel.db"),
+	[]byte("open-chan-bucket"),
+	[]byte("closed-chan-bucket"),
+
 	// Deliberately absent: the bare "SQLite format 3" magic (every browser
 	// database on the disk would match) and the 4-byte "mkey"/"ckey" keys
 	// (expected hundreds of thousands of random hits per terabyte).
@@ -497,7 +601,7 @@ var needles = [][]byte{
 // Scan blocks for traces of bitcoin wallets, the function will
 // wait in blocks on in until it sees EOF, and output scanned blocks
 // to out for reuse.
-func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig) {
+func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig, reveal bool) {
 	seq := 0
 	for block := range in {
 		if block == EOF {
@@ -538,9 +642,14 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 		}
 		// Seed phrases use the same exactly-once rule: a phrase ending past
 		// the logical block start is reported here, otherwise it was already
-		// reported with an earlier block. Only the phrase length is ever
-		// printed; the words themselves stay out of logs and output.
-		for _, m := range findBIP39(data, block.offset, block.overlap == 0, block.final) {
+		// reported with an earlier block. Only labels, positions, and counts
+		// are ever printed; words stay out of logs and output unless reveal.
+		// Electrum and SLIP39 seeds compute here too: validated seeds of
+		// any wordlist suppress the weaker unordered hint below.
+		exact, near, unordered := findBIP39Phrases(data, block.offset, block.overlap == 0, block.final)
+		electrumSeeds := findElectrumSeeds(data, block.offset, block.overlap == 0, block.final)
+		slip39Seeds := findSLIP39(data, block.offset, block.overlap == 0, block.final)
+		for _, m := range exact {
 			if m.endAbs > block.offset+int64(block.overlap) {
 				label := fmt.Sprintf("bip39-%d", m.words)
 				d := Detection{
@@ -550,6 +659,60 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 					Target:      block.source.Describe(),
 					BlockOffset: block.offset + int64(block.overlap),
 					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if reveal {
+					d.Words = m.phrase
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+							label, d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range near {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				label := fmt.Sprintf("bip39-%d-near-miss", m.words)
+				d := Detection{
+					Description: fmt.Sprintf("Found '%s %s' at %s", label, m.pattern(), block.location),
+					Needle:      label,
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if reveal {
+					d.Words = m.phrase
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+							label, d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range unordered {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				if unorderedSuppressedBySeed(m, electrumSeeds, slip39Seeds) {
+					continue
+				}
+				label := "bip39-unordered"
+				d := Detection{
+					Description: fmt.Sprintf("Found '%s run=%d' at %s", label, m.words, block.location),
+					Needle:      label,
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if reveal {
+					d.Words = m.phrase
 				}
 				if carve.dir != "" {
 					seq++
@@ -599,6 +762,119 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 					seq++
 					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
 						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'eth-keystore' at %s byte %d: %s\n",
+							d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		// Goal 6 formats share the reporting rule and the privacy
+		// discipline: type labels only, never key or seed material
+		// (words ride along only with --reveal, like BIP39).
+		for _, m := range electrumSeeds {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				if suppressedByBIP39(m, exact) {
+					continue
+				}
+				d := Detection{
+					Description: fmt.Sprintf("Found 'electrum-seed' at %s", block.location),
+					Needle:      "electrum-seed",
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if reveal {
+					d.Words = m.phrase
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'electrum-seed' at %s byte %d: %s\n",
+							d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range findElectrumFiles(data, block.offset, block.overlap == 0, block.final) {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				d := Detection{
+					Description: fmt.Sprintf("Found 'electrum-file' at %s", block.location),
+					Needle:      "electrum-file",
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'electrum-file' at %s byte %d: %s\n",
+							d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range findDescriptors(data, block.offset, block.overlap == 0, block.final) {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				d := Detection{
+					Description: fmt.Sprintf("Found 'descriptor' at %s", block.location),
+					Needle:      "descriptor",
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'descriptor' at %s byte %d: %s\n",
+							d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range slip39Seeds {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				label := fmt.Sprintf("slip39-%d", m.words)
+				d := Detection{
+					Description: fmt.Sprintf("Found '%s share' at %s", label, block.location),
+					Needle:      label,
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if reveal {
+					d.Words = m.phrase
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+							label, d.Target, d.Offset, err.Error())
+					}
+				}
+				onDetection(d)
+			}
+		}
+		for _, m := range findMetaMask(data, block.offset, block.overlap == 0, block.final) {
+			if m.endAbs > block.offset+int64(block.overlap) {
+				d := Detection{
+					Description: fmt.Sprintf("Found 'metamask-vault' at %s", block.location),
+					Needle:      "metamask-vault",
+					Offset:      m.startAbs,
+					Target:      block.source.Describe(),
+					BlockOffset: block.offset + int64(block.overlap),
+					MatchLen:    int(m.endAbs - m.startAbs),
+				}
+				if carve.dir != "" {
+					seq++
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'metamask-vault' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}

@@ -31,6 +31,7 @@ var carveMagics = []struct {
 	{"sqlite", []byte("SQLite format 3\x00")},
 	{"bdb", []byte{0x62, 0x31, 0x05, 0x00}},
 	{"bdb", []byte{0x61, 0x15, 0x06, 0x00}},
+	{"bbolt", []byte{0xED, 0x0C, 0xDA, 0xED}},
 	{"gzip", []byte{0x1f, 0x8b}},
 	{"zip", []byte{0x50, 0x4b, 0x03, 0x04}},
 }
@@ -86,6 +87,15 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 	} else {
 		d.Carve = info
 	}
+
+	// Best-effort crack-material extraction: the carve often holds the mkey
+	// record or keystore the hit points at. The re-read is bounded; anything
+	// unusable is skipped, never emitted as a bogus hash.
+	d.Hashes = carveHashes(binPath, start)
+
+	// Best-effort salvage: reassemble database pages from the carve into a
+	// .salvage.db file with a page map, when at least two pages stitch.
+	d.Salvage = carveSalvage(binPath, start, dir, seq)
 
 	sidecar, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
@@ -208,4 +218,51 @@ func openRangeReader(source scanTarget, off int64) (TargetReader, error) {
 		}
 	}
 	return r, nil
+}
+
+// carveHashes re-reads a carved file (bounded) and extracts crack-ready
+// password material. baseAbs is the target offset of the carve's first byte.
+func carveHashes(binPath string, baseAbs int64) []CrackHash {
+	f, err := os.Open(binPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || st.Size() > HashScanMaxBytes {
+		return nil
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return nil
+	}
+	return ExtractHashes(buf, baseAbs)
+}
+
+// carveSalvage re-reads a carved file (bounded) and attempts database
+// salvage, writing hit-NNNNNN.salvage.db beside the carve on success.
+// baseAbs is the target offset of the carve's first byte.
+func carveSalvage(binPath string, baseAbs int64, dir string, seq int) *SalvageInfo {
+	f, err := os.Open(binPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err != nil || st.Size() > SalvageMaxBytes {
+		return nil
+	}
+	buf, err := io.ReadAll(f)
+	if err != nil {
+		return nil
+	}
+	r := Salvage(buf, baseAbs)
+	if r == nil {
+		return nil
+	}
+	salvPath := filepath.Join(dir, fmt.Sprintf("hit-%06d.salvage.db", seq))
+	if err := os.WriteFile(salvPath, r.Image, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "[carve] warning: could not write salvage %s: %s\n", salvPath, err.Error())
+		return nil
+	}
+	r.Info.Path = salvPath
+	return &r.Info
 }

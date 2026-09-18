@@ -164,3 +164,137 @@ func isHex(s string) bool {
 func keystoreDescription(location string) string {
 	return fmt.Sprintf("Found 'eth-keystore' at %s", location)
 }
+
+// KeystoreParams is the crack-relevant parameter set of a Web3 Secret
+// Storage keystore: everything ethereum2john.py forwards to a cracker.
+// Addresses are never read: they stay out of output by construction.
+type KeystoreParams struct {
+	Cipher     string
+	Ciphertext string
+	MAC        string
+	KDF        string // "scrypt" or "pbkdf2"
+	N, R, P    int    // scrypt
+	C          int    // pbkdf2 iterations
+	PRF        string // pbkdf2 prf
+	Salt       string
+	DKLen      int
+	Offset     int64
+}
+
+type keystoreKDFParams struct {
+	DKLen int    `json:"dklen"`
+	N     int    `json:"n"`
+	R     int    `json:"r"`
+	P     int    `json:"p"`
+	C     int    `json:"c"`
+	PRF   string `json:"prf"`
+	Salt  string `json:"salt"`
+}
+
+type keystoreCryptoFull struct {
+	Cipher     string            `json:"cipher"`
+	Ciphertext string            `json:"ciphertext"`
+	MAC        string            `json:"mac"`
+	KDF        string            `json:"kdf"`
+	KDFParams  keystoreKDFParams `json:"kdfparams"`
+}
+
+type keystoreFileFull struct {
+	Crypto  *keystoreCryptoFull `json:"crypto"`
+	CryptoC *keystoreCryptoFull `json:"Crypto"`
+}
+
+// ParseKeystore extracts the crack-relevant parameters from one keystore
+// object at absolute offset. It is strict: anything ethereum2john.py would
+// reject (or silently mangle) errors here instead of producing a hash no
+// cracker could use.
+func ParseKeystore(raw []byte, offset int64) (KeystoreParams, error) {
+	fail := func(format string, args ...any) (KeystoreParams, error) {
+		return KeystoreParams{}, fmt.Errorf("keystore at byte %d: %s", offset, fmt.Sprintf(format, args...))
+	}
+	var ks keystoreFileFull
+	if err := json.Unmarshal(raw, &ks); err != nil {
+		return fail("not valid JSON: %s", err)
+	}
+	c := ks.Crypto
+	if c == nil {
+		c = ks.CryptoC
+	}
+	if c == nil {
+		return fail("no crypto object (presale wallets unsupported)")
+	}
+	if c.Cipher != "aes-128-ctr" {
+		return fail("unsupported cipher %q", c.Cipher)
+	}
+	if !isHex(c.Ciphertext) {
+		return fail("ciphertext is not hex")
+	}
+	if !isHex(c.MAC) {
+		return fail("mac is missing or not hex")
+	}
+	p := KeystoreParams{
+		Cipher: c.Cipher, Ciphertext: c.Ciphertext, MAC: c.MAC,
+		KDF: c.KDF, Salt: c.KDFParams.Salt, DKLen: c.KDFParams.DKLen, Offset: offset,
+	}
+	switch c.KDF {
+	case "scrypt":
+		p.N, p.R, p.P = c.KDFParams.N, c.KDFParams.R, c.KDFParams.P
+		if p.N <= 0 || p.R <= 0 || p.P <= 0 {
+			return fail("scrypt needs positive n/r/p, got %d/%d/%d", p.N, p.R, p.P)
+		}
+		if !isHex(p.Salt) {
+			return fail("scrypt salt is missing or not hex")
+		}
+	case "pbkdf2":
+		p.C, p.PRF = c.KDFParams.C, c.KDFParams.PRF
+		if p.PRF != "hmac-sha256" {
+			return fail("unsupported pbkdf2 prf %q", p.PRF)
+		}
+		if p.C <= 0 {
+			return fail("pbkdf2 needs positive iteration count, got %d", p.C)
+		}
+		if !isHex(p.Salt) {
+			return fail("pbkdf2 salt is missing or not hex")
+		}
+	default:
+		return fail("unsupported kdf %q", c.KDF)
+	}
+	return p, nil
+}
+
+// Hash renders the hashcat/John `ethereum` input exactly as ethereum2john.py
+// does, minus its filename prefix (which hashcat rejects so loudly the forum
+// tells everyone to strip it):
+//
+//	scrypt: $ethereum$s*<n>*<r>*<p>*<salt>*<ciphertext>*<mac>
+//	pbkdf2: $ethereum$p*<c>*<salt>*<ciphertext>*<mac>
+func (p KeystoreParams) Hash() (CrackHash, error) {
+	params := map[string]string{
+		"cipher": p.Cipher,
+		"dklen":  fmt.Sprint(p.DKLen),
+	}
+	var hash, kdf string
+	var iters uint32
+	switch p.KDF {
+	case "scrypt":
+		hash = fmt.Sprintf("$ethereum$s*%d*%d*%d*%s*%s*%s",
+			p.N, p.R, p.P, p.Salt, p.Ciphertext, p.MAC)
+		kdf, iters = "scrypt", uint32(p.N)
+		params["n"], params["r"], params["p"] = fmt.Sprint(p.N), fmt.Sprint(p.R), fmt.Sprint(p.P)
+	case "pbkdf2":
+		hash = fmt.Sprintf("$ethereum$p*%d*%s*%s*%s", p.C, p.Salt, p.Ciphertext, p.MAC)
+		kdf, iters = "pbkdf2-hmac-sha256", uint32(p.C)
+		params["prf"] = p.PRF
+	default:
+		return CrackHash{}, fmt.Errorf("cannot hash keystore with kdf %q", p.KDF)
+	}
+	return CrackHash{
+		Format:     "ethereum-keystore",
+		Hash:       hash,
+		KDF:        kdf,
+		Iterations: iters,
+		SaltHex:    p.Salt,
+		Params:     params,
+		Offset:     p.Offset,
+	}, nil
+}

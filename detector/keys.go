@@ -40,7 +40,7 @@ func isWIFStart(b byte) bool {
 	return false
 }
 
-var xkeyPrefixes = []string{"xprv", "xpub", "tprv", "tpub", "yprv", "ypub", "zprv", "zpub"}
+var xkeyPrefixes = []string{"xprv", "xpub", "tprv", "tpub", "yprv", "ypub", "zprv", "zpub", "uprv", "upub", "vprv", "vpub"}
 
 func isXKeyPrefix(s []byte) bool {
 	if len(s) < 4 {
@@ -59,6 +59,8 @@ var xkeyVersions = map[uint32]string{
 	0x04358394: "tprv", 0x043587CF: "tpub",
 	0x049D7878: "yprv", 0x049D7CB2: "ypub",
 	0x04B2430C: "zprv", 0x04B24746: "zpub",
+	0x044A4E28: "uprv", 0x044A5262: "upub",
+	0x045F18BC: "vprv", 0x045F1CF6: "vpub",
 }
 
 // base58Decode decodes alphabet-only input. Inputs past the longest key are
@@ -93,6 +95,45 @@ func base58Decode(s string) ([]byte, bool) {
 		out[i] = num[j]
 	}
 	return out, true
+}
+
+// base58Encode renders raw bytes in the base58 alphabet.
+func base58Encode(raw []byte) string {
+	zeros := 0
+	for zeros < len(raw) && raw[zeros] == 0 {
+		zeros++
+	}
+	var num []byte
+	for i := zeros; i < len(raw); i++ {
+		carry := int(raw[i])
+		for j := 0; j < len(num); j++ {
+			carry += int(num[j]) << 8
+			num[j] = byte(carry % 58)
+			carry /= 58
+		}
+		for carry > 0 {
+			num = append(num, byte(carry%58))
+			carry /= 58
+		}
+	}
+	out := make([]byte, 0, zeros+len(num))
+	for i := 0; i < zeros; i++ {
+		out = append(out, '1')
+	}
+	for j := len(num) - 1; j >= 0; j-- {
+		out = append(out, base58Alphabet[num[j]])
+	}
+	return string(out)
+}
+
+// base58CheckEncode renders payload with a 4-byte double-SHA256 checksum.
+func base58CheckEncode(payload []byte) string {
+	sum := sha256.Sum256(payload)
+	sum2 := sha256.Sum256(sum[:])
+	raw := make([]byte, 0, len(payload)+4)
+	raw = append(raw, payload...)
+	raw = append(raw, sum2[:4]...)
+	return base58Encode(raw)
 }
 
 // base58CheckDecode verifies the trailing 4-byte double-SHA256 checksum and

@@ -34,6 +34,39 @@ func FuzzBIP39(f *testing.F) {
 				t.Fatalf("bad word count: %+v", m)
 			}
 		}
+		_, near, unordered := findBIP39Phrases(data, base, first, final)
+		for _, m := range near {
+			if m.startAbs < base || m.endAbs > base+int64(len(data)) || m.startAbs >= m.endAbs {
+				t.Fatalf("near-miss out of bounds: %+v base %d len %d", m, base, len(data))
+			}
+			if m.endAbs-m.startAbs > bip39MaxSpan {
+				t.Fatalf("near-miss exceeds max span: %+v", m)
+			}
+			if len(m.gaps) == 0 || len(m.gaps) > bip39MaxUnknown {
+				t.Fatalf("bad gap count: %+v", m)
+			}
+			for _, g := range m.gaps {
+				if g < 0 || g >= m.words {
+					t.Fatalf("gap out of range: %+v", m)
+				}
+			}
+			if len(m.typo) != len(m.gaps) || len(m.validating) != len(m.gaps) {
+				t.Fatalf("gap counts misaligned: %+v", m)
+			}
+			for i := range m.gaps {
+				if m.validating[i] > m.typo[i] {
+					t.Fatalf("validating exceeds typo: %+v", m)
+				}
+			}
+		}
+		for _, u := range unordered {
+			if u.startAbs < base || u.endAbs > base+int64(len(data)) || u.startAbs >= u.endAbs {
+				t.Fatalf("unordered out of bounds: %+v base %d len %d", u, base, len(data))
+			}
+			if u.words < bip39MinUnorderedRun {
+				t.Fatalf("short unordered run: %+v", u)
+			}
+		}
 	})
 }
 

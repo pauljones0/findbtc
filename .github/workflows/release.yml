@@ -20,6 +20,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      - uses: anchore/sbom-action/download-syft@v0
       - uses: goreleaser/goreleaser-action@v6
         with:
           distribution: goreleaser
@@ -30,3 +31,4 @@ jobs:
       - uses: actions/attest@v2
         with:
           subject-checksums: dist/checksums.txt
+          predicate-type: https://slsa.dev/provenance/v1

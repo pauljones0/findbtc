@@ -30,10 +30,16 @@ archives:
 checksum:
   name_template: checksums.txt
 
-# One-time setup: create an empty public repo named homebrew-findbtc under
-# the same owner; releases then push the cask there automatically.
+# SPDX SBOM per archive, generated with syft (installed by release.yml).
+sboms:
+  - artifacts: archive
+
+# The cask file is generated into dist/ but not pushed: the tap repo does
+# not exist yet. Create an empty public repo named homebrew-findbtc under
+# the release owner and flip skip_upload to publish it automatically.
 homebrew_casks:
   - name: findbtc
+    skip_upload: true
     repository:
       owner: jakewins
       name: homebrew-findbtc

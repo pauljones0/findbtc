@@ -644,7 +644,7 @@ func TestFindsBIP39WithMixedCaseAndSeparators(t *testing.T) {
 
 // Valid words with a bad checksum, and runs too short to be phrases, report
 // nothing.
-func TestRejectsInvalidBIP39Checksum(t *testing.T) {
+func TestBadChecksumYieldsOnlyUnorderedHint(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad.bin")
 	buf := bytes.Repeat([]byte{'x'}, 2*4096)
@@ -657,8 +657,14 @@ func TestRejectsInvalidBIP39Checksum(t *testing.T) {
 	recorder := &detectionRecorder{}
 	detector.Scan(0, path, recorder.OnDetection, recorder.OnProgress)
 
-	if len(recorder.detections) != 0 {
-		t.Errorf("expected no detections for bad checksums, got %v", recorder.detections)
+	// A bad checksum must never report as an exact phrase — but since Goal 3
+	// the 12-word run reports as a low-confidence unordered hint, while the
+	// 11-word run stays silent (below threshold).
+	if len(recorder.detections) != 1 {
+		t.Fatalf("expected only the unordered hint, got %v", recorder.detections)
+	}
+	if d := recorder.detections[0]; d.Needle != "bip39-unordered" {
+		t.Errorf("needle = %q, want bip39-unordered", d.Needle)
 	}
 }
 
