@@ -1,0 +1,47 @@
+version: 2
+
+project_name: findbtc
+
+builds:
+  - id: findbtc
+    main: .
+    binary: findbtc
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: 'findbtc_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+# One-time setup: create an empty public repo named homebrew-findbtc under
+# the same owner; releases then push the cask there automatically.
+homebrew_casks:
+  - name: findbtc
+    repository:
+      owner: jakewins
+      name: homebrew-findbtc
+    homepage: https://github.com/jakewins/findbtc
+    description: Find BTC wallets by scanning raw block devices
+    license: GPL-3.0-or-later
+    binaries:
+      - findbtc
+
+snapshot:
+  version_template: '{{ .Tag }}-SNAPSHOT-{{ .ShortCommit }}'
