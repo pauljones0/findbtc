@@ -58,6 +58,11 @@ func (t *zipScanTarget) Open() (TargetReader, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The member is fully inflated below and served from memory, so the
+	// parent handle must not outlive this call: every nested zip target
+	// would otherwise leak an OS file handle (on Windows the source file
+	// then cannot be deleted after Scan returns).
+	defer f.Close()
 
 	// Try to read the zipfile;
 	// TODO: More resilient zip reading may be possible; handling things like partials and corrupted files

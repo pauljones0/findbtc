@@ -37,11 +37,13 @@ func (t *gzipScanTarget) Open() (TargetReader, error) {
 	}
 
 	if _, err := f.Seek(t.gzipOffset, 0); err != nil {
+		f.Close()
 		return nil, err
 	}
 
 	reader, err := gzip.NewReader(f)
 	if err != nil {
+		f.Close()
 		return nil, err
 	}
 
