@@ -1,0 +1,3 @@
+# Go sources check out with LF on every OS: gofmt flags CRLF, and CI
+# runs gofmt on Windows.
+*.go text eol=lf
