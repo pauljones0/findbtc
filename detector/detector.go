@@ -516,17 +516,17 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		if checkpointRoot && opts.CheckpointPath != "" && f != nil {
 			writeCheckpoint(opts.CheckpointPath, target.Describe(), currentOffset)
 		}
-		select {
-		case <-ctx.Done():
-			if f != nil {
-				f.Close()
-			}
-			return
-		case out <- EOF:
-		}
+		// Close before signalling EOF downstream: the completion races
+		// ahead, and on Windows an open handle blocks deleting the file
+		// (including test TempDir cleanup) after Scan returns.
 		if f != nil {
 			f.Close()
 			f = nil
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case out <- EOF:
 		}
 	}
 }
