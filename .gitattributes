@@ -1,3 +1,10 @@
-# Go sources check out with LF on every OS: gofmt flags CRLF, and CI
-# runs gofmt on Windows.
+# Go sources and text fixtures check out with LF on every OS: gofmt
+# flags CRLF sources, and CRLF wordlists would poison word lookups.
 *.go text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+# Binary fixtures must never be line-ending converted.
+detector/testdata/** binary

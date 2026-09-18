@@ -22,7 +22,7 @@ import (
 //go:embed electrum-english.txt
 var electrumWordlistRaw string
 
-var electrumWords = strings.Split(strings.TrimSpace(electrumWordlistRaw), "\n")
+var electrumWords = splitWordlist(electrumWordlistRaw)
 
 var electrumWordIndex = func() map[string]bool {
 	m := make(map[string]bool, len(electrumWords))

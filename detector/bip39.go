@@ -10,7 +10,17 @@ import (
 //go:embed bip39-english.txt
 var bip39WordlistRaw string
 
-var bip39Words = strings.Split(strings.TrimSpace(bip39WordlistRaw), "\n")
+// splitWordlist splits an embedded wordlist into words, tolerating CRLF
+// checkouts: a stray \r would otherwise poison every word lookup.
+func splitWordlist(raw string) []string {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	for i, w := range lines {
+		lines[i] = strings.TrimSuffix(w, "\r")
+	}
+	return lines
+}
+
+var bip39Words = splitWordlist(bip39WordlistRaw)
 
 var bip39WordIndex = func() map[string]uint16 {
 	m := make(map[string]uint16, len(bip39Words))

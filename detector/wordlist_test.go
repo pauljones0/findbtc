@@ -15,3 +15,11 @@ func TestBIP39Wordlist(t *testing.T) {
 		}
 	}
 }
+
+// A CRLF checkout must not poison lookups: every word keeps its index.
+func TestSplitWordlistCRLF(t *testing.T) {
+	words := splitWordlist("abandon\r\nabout\r\nzoo\r\n")
+	if len(words) != 3 || words[0] != "abandon" || words[1] != "about" || words[2] != "zoo" {
+		t.Fatalf("CRLF split gave %q", words)
+	}
+}

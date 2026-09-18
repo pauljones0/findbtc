@@ -18,7 +18,7 @@ import (
 //go:embed slip39-words.txt
 var slip39WordlistRaw string
 
-var slip39Words = strings.Split(strings.TrimSpace(slip39WordlistRaw), "\n")
+var slip39Words = splitWordlist(slip39WordlistRaw)
 
 var slip39WordIndex = func() map[string]int {
 	m := make(map[string]int, len(slip39Words))
