@@ -163,8 +163,8 @@ func TestFindsWalletsInTwoZipsSharingOneBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "two.zip")
 
-	zip1 := makeZip(t, "a.txt", "padding bestblock padding")
-	zip2 := makeZip(t, "b.txt", "padding defaultkey padding")
+	zip1 := makeZip(t, "a.txt", padHidden("padding bestblock padding"))
+	zip2 := makeZip(t, "b.txt", padHidden("padding defaultkey padding"))
 	if err := os.WriteFile(path, append(zip1, zip2...), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -179,6 +179,14 @@ func TestFindsWalletsInTwoZipsSharingOneBlock(t *testing.T) {
 	if !reflect.DeepEqual(expected, recorder.detections) {
 		t.Errorf("Expected %v to be %v", recorder.detections, expected)
 	}
+}
+
+// padHidden appends compressible padding after small deflated payloads so
+// the needle stays hidden from raw scans on every flate encoder. Tiny
+// inputs are stored as plaintext blocks by some versions (Go 1.27+) and
+// compressed by others (Go 1.24); kilobytes of runs compress everywhere.
+func padHidden(s string) string {
+	return s + strings.Repeat("x", 2048)
 }
 
 func makeZip(t *testing.T, name, content string) []byte {
@@ -216,15 +224,21 @@ func TestNestedArchivesStopAtDepthCap(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested.zip")
 
-	core := []byte("padding defaultkey padding")
+	core := []byte(padHidden("padding defaultkey padding"))
 	for level := 10; level >= 1; level-- {
+		// Leading pad keeps each wrapping level opaque on every flate
+		// encoder: a stored (plaintext) inner zip would expose its own
+		// end-of-central-directory to the outer level's scan, forging
+		// phantom archives and shortening the measured nesting depth.
+		// Leading garbage parses fine; trailing pad would move the ECD.
+		wrapped := append(bytes.Repeat([]byte{'x'}, 2048), core...)
 		if level == 3 {
 			core = makeZipFiles(t,
-				zipMember{"next.zip", core},
-				zipMember{"note.txt", []byte("padding bestblock padding")},
+				zipMember{"next.zip", wrapped},
+				zipMember{"note.txt", []byte(padHidden("padding bestblock padding"))},
 			)
 		} else {
-			core = makeZipFiles(t, zipMember{"next.zip", core})
+			core = makeZipFiles(t, zipMember{"next.zip", wrapped})
 		}
 	}
 	if err := os.WriteFile(path, core, 0644); err != nil {
@@ -273,7 +287,7 @@ func TestFindsGzipSplitAcrossBlockBoundary(t *testing.T) {
 
 	var gz bytes.Buffer
 	w := gzip.NewWriter(&gz)
-	if _, err := w.Write([]byte("padding bestblock padding")); err != nil {
+	if _, err := w.Write([]byte(padHidden("padding bestblock padding"))); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {
@@ -435,7 +449,7 @@ func TestCarvesRootDetection(t *testing.T) {
 func TestCarvesNestedZipDetection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "member.zip")
-	member := "padding bestblock padding"
+	member := padHidden("padding bestblock padding")
 
 	if err := os.WriteFile(path, makeZip(t, "a.txt", member), 0644); err != nil {
 		t.Fatal(err)
@@ -466,7 +480,7 @@ func TestCarvesNestedZipDetection(t *testing.T) {
 func TestCarvesNestedGzipDetection(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "member.gz")
-	member := "padding bestblock padding"
+	member := padHidden("padding bestblock padding")
 
 	var gz bytes.Buffer
 	w := gzip.NewWriter(&gz)
@@ -813,7 +827,7 @@ func TestRecoversTruncatedDeflatedZip(t *testing.T) {
 	path := filepath.Join(dir, "truncd.bin")
 
 	buf := bytes.Repeat([]byte{'x'}, 2048)
-	entry := makeLocalEntry(t, "w.dat", 8, 0, []byte("padding bestblock padding"))
+	entry := makeLocalEntry(t, "w.dat", 8, 0, []byte(padHidden("padding bestblock padding")))
 	copy(buf[100:], entry)
 	if err := os.WriteFile(path, buf, 0644); err != nil {
 		t.Fatal(err)
@@ -837,7 +851,7 @@ func TestSkipsDataDescriptorEntries(t *testing.T) {
 	path := filepath.Join(dir, "desc.bin")
 
 	buf := bytes.Repeat([]byte{'x'}, 2048)
-	copy(buf[100:], makeLocalEntry(t, "w.dat", 8, 0x8, []byte("padding bestblock padding")))
+	copy(buf[100:], makeLocalEntry(t, "w.dat", 8, 0x8, []byte(padHidden("padding bestblock padding"))))
 	if err := os.WriteFile(path, buf, 0644); err != nil {
 		t.Fatal(err)
 	}
