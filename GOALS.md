@@ -410,11 +410,11 @@ and SMART `S01`, and acquisition tools increasingly default to newer
 variants — users with modern acquisitions cannot scan at all.
 
 **Completely solved when:**
-- [ ] At least one refused variant is evaluated against real tooling
+- [x] At least one refused variant is evaluated against real tooling
       (acquire → parse → byte-compare, mirroring the E01 method) and
       either supported with fixtures or refused with a documented,
       actionable message.
-- [ ] Any supported variant gets the E01 treatment: eager parse,
+- [x] Any supported variant gets the E01 treatment: eager parse,
       checksums verified, stored-hash cross-check where the format has
       one, committed fixture.
 

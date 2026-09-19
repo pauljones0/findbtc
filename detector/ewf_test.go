@@ -11,6 +11,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,22 +27,16 @@ type ewfBuildOpt struct {
 	chunksPerSeg    int                  // 0: single segment
 }
 
-func buildEWF(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) string {
+// ewfEncodeChunks zlib-compresses or stores every chunk per comp, the
+// same encoding E01 and SMART share.
+func ewfEncodeChunks(t *testing.T, raw []byte, chunkBytes int, comp func(int) bool) (stored [][]byte, flags []bool) {
 	t.Helper()
-	spc := opt.sectorsPerChunk
-	if spc == 0 {
-		spc = 64
-	}
-	const bps = 512
-	chunkBytes := int(spc) * bps
 	nch := (len(raw) + chunkBytes - 1) / chunkBytes
-	nsec := (len(raw) + bps - 1) / bps
-	comp := opt.compress
 	if comp == nil {
 		comp = func(int) bool { return true }
 	}
-	stored := make([][]byte, nch)
-	flags := make([]bool, nch)
+	stored = make([][]byte, nch)
+	flags = make([]bool, nch)
 	for i := 0; i < nch; i++ {
 		c := make([]byte, chunkBytes)
 		copy(c, raw[i*chunkBytes:])
@@ -65,6 +60,20 @@ func buildEWF(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) strin
 			stored[i] = buf.Bytes()
 		}
 	}
+	return stored, flags
+}
+
+func buildEWF(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) string {
+	t.Helper()
+	spc := opt.sectorsPerChunk
+	if spc == 0 {
+		spc = 64
+	}
+	const bps = 512
+	chunkBytes := int(spc) * bps
+	nch := (len(raw) + chunkBytes - 1) / chunkBytes
+	nsec := (len(raw) + bps - 1) / bps
+	stored, flags := ewfEncodeChunks(t, raw, chunkBytes, opt.compress)
 	var groups [][]int
 	if opt.chunksPerSeg > 0 {
 		for i := 0; i < nch; i += opt.chunksPerSeg {
@@ -568,4 +577,257 @@ func firstDiff(a, b []byte) int {
 		}
 	}
 	return n
+}
+
+// Minimal SMART (S01) writer for tests. Layout mirrors real libewf SMART
+// output (verified byte-for-byte against ewfexport during Goal 14
+// development): 94-byte volume with SMART marker, table section carrying
+// the chunk data inline with absolute file offsets, hash/done on the
+// final segment, next-terminated earlier segments, done/next size 76.
+
+func buildSMART(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) string {
+	t.Helper()
+	spc := opt.sectorsPerChunk
+	if spc == 0 {
+		spc = 64
+	}
+	const bps = 512
+	chunkBytes := int(spc) * bps
+	nch := (len(raw) + chunkBytes - 1) / chunkBytes
+	nsec := (len(raw) + bps - 1) / bps
+	stored, flags := ewfEncodeChunks(t, raw, chunkBytes, opt.compress)
+	var groups [][]int
+	if opt.chunksPerSeg > 0 {
+		for i := 0; i < nch; i += opt.chunksPerSeg {
+			end := i + opt.chunksPerSeg
+			if end > nch {
+				end = nch
+			}
+			var g []int
+			for j := i; j < end; j++ {
+				g = append(g, j)
+			}
+			groups = append(groups, g)
+		}
+	} else {
+		var g []int
+		for i := 0; i < nch; i++ {
+			g = append(g, i)
+		}
+		groups = [][]int{g}
+	}
+	vol := make([]byte, 94)
+	binary.LittleEndian.PutUint32(vol[0:], 1)
+	binary.LittleEndian.PutUint32(vol[4:], uint32(nch))
+	binary.LittleEndian.PutUint32(vol[8:], spc)
+	binary.LittleEndian.PutUint32(vol[12:], bps)
+	binary.LittleEndian.PutUint64(vol[16:], uint64(nsec))
+	copy(vol[85:], "SMART")
+	binary.LittleEndian.PutUint32(vol[90:], adler32.Checksum(vol[:90]))
+	type part struct {
+		typ  string
+		data []byte
+	}
+	h := md5.Sum(raw)
+	hd := make([]byte, 36)
+	copy(hd, h[:])
+	binary.LittleEndian.PutUint32(hd[32:], adler32.Checksum(hd[:32]))
+	for s, g := range groups {
+		var parts []part
+		tabDesc := int64(13)
+		if s == 0 {
+			parts = append(parts, part{"volume", vol})
+			tabDesc += 76 + int64(len(vol))
+		}
+		// Table entries are absolute file offsets into this section's
+		// own data, which starts after the 24-byte table header and
+		// the n*4 offset array.
+		dataStart := tabDesc + 76 + 24 + int64(len(g))*4
+		var tab bytes.Buffer
+		h20 := make([]byte, 20)
+		binary.LittleEndian.PutUint32(h20[0:], uint32(len(g)))
+		tab.Write(h20)
+		var a [4]byte
+		binary.LittleEndian.PutUint32(a[:], adler32.Checksum(h20))
+		tab.Write(a[:])
+		pos := uint32(dataStart)
+		for _, ci := range g {
+			o := pos
+			if flags[ci] {
+				o |= 0x80000000
+			}
+			var e [4]byte
+			binary.LittleEndian.PutUint32(e[:], o)
+			tab.Write(e[:])
+			pos += uint32(len(stored[ci]))
+		}
+		for _, ci := range g {
+			tab.Write(stored[ci])
+		}
+		parts = append(parts, part{"table", tab.Bytes()})
+		if s == len(groups)-1 {
+			parts = append(parts, part{"hash", hd}, part{"done", nil})
+		} else {
+			parts = append(parts, part{"next", nil})
+		}
+		var out bytes.Buffer
+		out.Write(ewfSignature)
+		out.WriteByte(0x01)
+		var sn [2]byte
+		binary.LittleEndian.PutUint16(sn[:], uint16(s+1))
+		out.Write(sn[:])
+		out.Write([]byte{0x00, 0x00})
+		descOff := int64(13)
+		var starts []int64
+		for _, p := range parts {
+			starts = append(starts, descOff)
+			size := int64(76 + len(p.data))
+			if p.typ == "done" || p.typ == "next" {
+				size = 76 // real SMART writers emit the descriptor alone
+			}
+			descOff += size
+		}
+		for i, p := range parts {
+			nxt := starts[i]
+			if i+1 < len(parts) {
+				nxt = starts[i+1]
+			}
+			size := int64(76 + len(p.data))
+			data := p.data
+			if p.typ == "done" || p.typ == "next" {
+				size, data = 76, nil
+			}
+			hdr := make([]byte, 72)
+			copy(hdr, p.typ)
+			binary.LittleEndian.PutUint64(hdr[16:], uint64(nxt))
+			binary.LittleEndian.PutUint64(hdr[24:], uint64(size))
+			out.Write(hdr)
+			var a [4]byte
+			binary.LittleEndian.PutUint32(a[:], adler32.Checksum(hdr))
+			out.Write(a[:])
+			out.Write(data)
+		}
+		if err := os.WriteFile(fmt.Sprintf("%s/%s.s%02d", dir, name, s+1), out.Bytes(), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(dir, name+".s01")
+}
+
+func TestSMARTRoundTripMixed(t *testing.T) {
+	dir := t.TempDir()
+	raw := ewfTestRaw(t, 200*1024)
+	path := buildSMART(t, dir, "case", raw, ewfBuildOpt{compress: func(i int) bool { return i%2 == 0 }})
+	tgt, err := detectScanTarget(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ewfDecodeAll(t, tgt); !bytes.Equal(got, raw) {
+		t.Fatalf("SMART round trip differs at byte %d", firstDiff(got, raw))
+	}
+}
+
+func TestSMARTMultiSegment(t *testing.T) {
+	dir := t.TempDir()
+	raw := ewfTestRaw(t, 300*1024)
+	path := buildSMART(t, dir, "case", raw, ewfBuildOpt{chunksPerSeg: 2})
+	tgt, err := detectScanTarget(path, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ewfDecodeAll(t, tgt); !bytes.Equal(got, raw) {
+		t.Fatalf("SMART multi-segment differs at byte %d", firstDiff(got, raw))
+	}
+}
+
+func TestSMARTRealFixture(t *testing.T) {
+	tgt, err := detectScanTarget("testdata/ewf-real.S01", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	et, ok := tgt.(*ewfScanTarget)
+	if !ok {
+		t.Fatalf("target %T, want *ewfScanTarget", tgt)
+	}
+	if et.layout.flavor != "smart" {
+		t.Errorf("flavor %q, want smart", et.layout.flavor)
+	}
+	size, err := tgt.Size()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size != 4096 {
+		t.Fatalf("media size %d, want 4096", size)
+	}
+	got := ewfDecodeAll(t, tgt)
+	sum := md5.Sum(got)
+	// Acquired with ewfacquire -f smart from 4KiB of wallet-trace text;
+	// ewfexport of the same file hashes identically.
+	if got, want := fmt.Sprintf("%x", sum), "739687d272315e8c5c1f5dda2086c2dd"; got != want {
+		t.Fatalf("decoded md5 %s, want %s", got, want)
+	}
+	if !et.layout.hasMD5 || fmt.Sprintf("%x", et.layout.md5) != "739687d272315e8c5c1f5dda2086c2dd" {
+		t.Errorf("stored MD5 missing or mismatched: has=%v md5=%x", et.layout.hasMD5, et.layout.md5)
+	}
+}
+
+func TestScanS01FindsWallet(t *testing.T) {
+	var dets []Detection
+	err := ScanWithOptions(0, "testdata/ewf-real.S01", Options{},
+		func(d Detection) { dets = append(dets, d) },
+		func(ProgressInfo) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range dets {
+		if d.Needle == "bestblock" || d.Needle == "orderposnext" {
+			found = true
+		}
+		if d.Target != "testdata/ewf-real.S01" {
+			t.Errorf("detection target %q, want the S01 path", d.Target)
+		}
+	}
+	if !found {
+		t.Errorf("no wallet needles in S01 scan: %+v", dets)
+	}
+}
+
+func TestSMARTCorruptTableFailsFast(t *testing.T) {
+	raw, err := os.ReadFile("testdata/ewf-real.S01")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Corrupt a table entry offset (table data starts after the volume
+	// section; any byte flip inside must fail eager parsing).
+	raw[400] ^= 0xFF
+	path := filepath.Join(t.TempDir(), "bad.s01")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := detectScanTarget(path, 0); err == nil {
+		t.Error("corrupt S01 table must fail eager parsing")
+	}
+}
+
+func TestEWF2Refused(t *testing.T) {
+	// Real EWF2 sample (ewfacquire -f encase7-v2): refused with a
+	// conversion pointer, never misread as raw or v1.
+	if _, err := detectScanTarget("testdata/ewf-real.Ex01", 0); err == nil {
+		t.Error("Ex01 must be refused")
+	} else if !strings.Contains(err.Error(), "EWF2") || !strings.Contains(err.Error(), "ewfexport") {
+		t.Errorf("Ex01 refusal must name EWF2 and ewfexport: %v", err)
+	}
+	// Magic-only probe: any EVF2 file refuses, which also covers Lx01
+	// (same EWF2 framing, no acquirable sample).
+	magic := append(append([]byte{}, ewf2Signature...), make([]byte, 64)...)
+	path := filepath.Join(t.TempDir(), "probe.Lx01")
+	if err := os.WriteFile(path, magic, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := detectScanTarget(path, 0); err == nil {
+		t.Error("EVF2 magic must be refused")
+	} else if !strings.Contains(err.Error(), "EWF2") {
+		t.Errorf("EVF2 refusal must name EWF2: %v", err)
+	}
 }

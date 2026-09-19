@@ -1,11 +1,15 @@
-// Forensic image input: Expert Witness Format (EnCase E01) and split raw.
+// Forensic image input: Expert Witness Format (EnCase E01, SMART S01)
+// and split raw.
 //
-// EWF support is a dependency-free reader for the EnCase E01 layout
-// (EWF-S01 SMART and EWF2 Ex01/Lx01 are rejected, not misread). Segment
-// files are parsed eagerly when the scan target is built so a corrupt or
-// truncated set fails the scan up front instead of silently yielding
-// partial data. Chunk checksums are verified on decode; a bad chunk is a
-// hard error identifying the chunk, never silent corruption.
+// EWF support is a dependency-free reader for the EWF v1 layouts: E01
+// (sectors + table sections, 1052-byte volume) and S01 (table section
+// holds the chunk data, 94-byte SMART volume). EWF2 images (Ex01/Lx01,
+// "EVF2" magic, compressed metadata) are refused with a conversion
+// pointer, never misread. Segment files are parsed eagerly when the scan
+// target is built so a corrupt or truncated set fails the scan up front
+// instead of silently yielding partial data. Chunk checksums are verified
+// on decode; a bad chunk is a hard error identifying the chunk, never
+// silent corruption.
 package detector
 
 import (
@@ -22,18 +26,26 @@ import (
 	"strings"
 )
 
-// EWF layout constants (EnCase E01, EWF v1).
+// EWF layout constants (EWF v1: EnCase E01 and SMART S01).
 const (
-	ewfFileHeaderLen = 13
-	ewfSectionDesc   = 76
-	ewfVolumeLen     = 1052
-	ewfHashLen       = 36
-	ewfTableHeadLen  = 24
-	ewfMaxSegments   = 99
-	ewfMaxChunkBytes = 64 << 20
+	ewfFileHeaderLen  = 13
+	ewfSectionDesc    = 76
+	ewfVolumeLen      = 1052
+	ewfSmartVolumeLen = 94
+	ewfHashLen        = 36
+	ewfTableHeadLen   = 24
+	ewfMaxSegments    = 99
+	ewfMaxChunkBytes  = 64 << 20
 )
 
+// ewfSmartMarker sits at volume[85:90] in SMART (S01) volume sections.
+var ewfSmartMarker = []byte{0x53, 0x4D, 0x41, 0x52, 0x54} // "SMART"
+
 var ewfSignature = []byte{0x45, 0x56, 0x46, 0x09, 0x0d, 0x0a, 0xff, 0x00}
+
+// ewf2Signature starts EWF2 images (Ex01/Lx01): same "EVF" stamp, format
+// byte 0x32, different framing. Refused, never misread.
+var ewf2Signature = []byte{0x45, 0x56, 0x46, 0x32, 0x0d, 0x0a, 0x81, 0x00}
 
 // splitRawPattern matches EnCase-style split raw footprints: base.001, base.002, ...
 var splitRawPattern = regexp.MustCompile(`(?i)\.\d{3}$`)
@@ -42,6 +54,9 @@ var splitRawPattern = regexp.MustCompile(`(?i)\.\d{3}$`)
 // through the EWF reader, split raw sets concatenate, everything else scans
 // as one raw file. EWF sets are parsed eagerly so corruption fails fast.
 func detectScanTarget(path string, startOffset int64) (scanTarget, error) {
+	if isEWF2Segment(path) {
+		return nil, fmt.Errorf("ewf: %s is an EWF2 image (Ex01/Lx01): only EWF v1 (E01) and SMART (S01) can be scanned directly — convert first with libewf (ewfexport -u -t out -f raw %s) and scan the raw output", path, path)
+	}
 	if isEWFSegment(path) {
 		layout, err := openEWFLayout(path)
 		if err != nil {
@@ -59,8 +74,17 @@ func detectScanTarget(path string, startOffset int64) (scanTarget, error) {
 	return &fileScanTarget{startOffset: startOffset, path: path}, nil
 }
 
-// isEWFSegment reports whether path starts with the EWF file signature.
+// isEWFSegment reports whether path starts with the EWF v1 signature.
 func isEWFSegment(path string) bool {
+	return hasFileMagic(path, ewfSignature)
+}
+
+// isEWF2Segment reports whether path starts with the EWF2 signature.
+func isEWF2Segment(path string) bool {
+	return hasFileMagic(path, ewf2Signature)
+}
+
+func hasFileMagic(path string, magic []byte) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
@@ -70,7 +94,7 @@ func isEWFSegment(path string) bool {
 	if _, err := io.ReadFull(f, hdr[:]); err != nil {
 		return false
 	}
-	return bytes.Equal(hdr[:], ewfSignature)
+	return bytes.Equal(hdr[:], magic)
 }
 
 // ewfChunk locates one decoded chunk inside a segment file.
@@ -84,6 +108,7 @@ type ewfChunk struct {
 // ewfLayout is the fully parsed geometry of an EWF segment set.
 type ewfLayout struct {
 	paths      []string
+	flavor     string // "ewf" (.E01) or "smart" (.S01), from the set's extension
 	chunks     []ewfChunk
 	chunkBytes int64
 	mediaSize  int64
@@ -92,20 +117,20 @@ type ewfLayout struct {
 }
 
 // openEWFLayout parses every segment of the set containing firstPath.
-// firstPath must be segment 1 (.E01); the set continues while .E02, .E03,
-// ... exist.
+// firstPath must be segment 1 (.E01 or .S01); the set continues while
+// .E02/.S02, .E03/.S03, ... exist.
 func openEWFLayout(firstPath string) (*ewfLayout, error) {
-	segNum, err := ewfSegmentNumber(firstPath)
+	segNum, kind, err := ewfSegmentNumber(firstPath)
 	if err != nil {
 		return nil, err
 	}
 	if segNum != 1 {
-		return nil, fmt.Errorf("ewf: pass segment 1 (.E01) of the set, not %s", firstPath)
+		return nil, fmt.Errorf("ewf: pass segment 1 (.%s01) of the set, not %s", kind, firstPath)
 	}
 	base := strings.TrimSuffix(firstPath, filepath.Ext(firstPath))
 	var paths []string
 	for n := 1; n <= ewfMaxSegments; n++ {
-		p := fmt.Sprintf("%s.E%02d", base, n)
+		p := fmt.Sprintf("%s.%s%02d", base, kind, n)
 		if _, err := os.Stat(p); err != nil {
 			if n == 1 {
 				return nil, fmt.Errorf("ewf: cannot stat %s: %w", p, err)
@@ -114,7 +139,11 @@ func openEWFLayout(firstPath string) (*ewfLayout, error) {
 		}
 		paths = append(paths, p)
 	}
-	layout := &ewfLayout{paths: paths}
+	flavor := "ewf"
+	if kind == "S" || kind == "s" {
+		flavor = "smart"
+	}
+	layout := &ewfLayout{paths: paths, flavor: flavor}
 	var volumeSeen bool
 	var lastIsNext bool
 	for i, p := range paths {
@@ -137,17 +166,30 @@ func openEWFLayout(firstPath string) (*ewfLayout, error) {
 	return layout, nil
 }
 
-// ewfSegmentNumber extracts the segment number from an .E01-style path.
-func ewfSegmentNumber(path string) (int, error) {
+// ewfSegmentNumber extracts the segment number and set letter ("E" or
+// "S") from an .E01/.S01-style path.
+func ewfSegmentNumber(path string) (int, string, error) {
 	ext := filepath.Ext(path)
-	if len(ext) != 4 || (ext[0] != '.' || (ext[1] != 'E' && ext[1] != 'e')) {
-		return 0, fmt.Errorf("ewf: %s is not an EWF segment path (want .E01)", path)
+	bad := func() (int, string, error) {
+		return 0, "", fmt.Errorf("ewf: %s is not an EWF segment path (want .E01 or .S01)", path)
+	}
+	if len(ext) != 4 || ext[0] != '.' {
+		return bad()
+	}
+	var kind string
+	switch ext[1] {
+	case 'E', 'e', 'S', 's':
+		// Preserve the input's case: SMART writers emit lowercase
+		// .s01/.s02, EnCase writers uppercase .E01/.E02.
+		kind = ext[1:2]
+	default:
+		return bad()
 	}
 	n, err := strconv.Atoi(ext[2:])
 	if err != nil || n < 1 {
-		return 0, fmt.Errorf("ewf: %s is not an EWF segment path (want .E01)", path)
+		return bad()
 	}
-	return n, nil
+	return n, kind, nil
 }
 
 // parseSegment walks one segment file, appending its chunks to the layout.
@@ -188,8 +230,10 @@ func (l *ewfLayout) parseSegment(path string, segNum int, volumeSeen *bool) (boo
 		}
 		var data []byte
 		if typ == "done" || typ == "next" {
-			if size != 0 {
-				return false, fmt.Errorf("ewf: %s: section %q has size %d, want 0", path, typ, size)
+			// E01 writers emit size 0; SMART writers emit 76 (the
+			// descriptor alone). Both mean "no section data".
+			if size != 0 && size != ewfSectionDesc {
+				return false, fmt.Errorf("ewf: %s: section %q has size %d, want 0 or %d", path, typ, size, ewfSectionDesc)
 			}
 		} else {
 			if size < ewfSectionDesc {
@@ -210,9 +254,6 @@ func (l *ewfLayout) parseSegment(path string, segNum int, volumeSeen *bool) (boo
 			sectorsDesc = off
 			sectorsEnd = off + size
 		case "table":
-			if sectorsDesc < 0 {
-				return false, fmt.Errorf("ewf: %s: table section without sectors", path)
-			}
 			if err := l.parseTable(path, segNum, data, off, sectorsDesc, sectorsEnd); err != nil {
 				return false, err
 			}
@@ -239,12 +280,20 @@ func (l *ewfLayout) parseSegment(path string, segNum int, volumeSeen *bool) (boo
 	return sawNext, nil
 }
 
-// parseVolume reads media geometry from the volume section data.
+// parseVolume reads media geometry from the volume section data. E01
+// volumes are 1052 bytes; SMART (S01) volumes are 94 bytes with the same
+// leading geometry fields, a "SMART" marker, and a trailing checksum.
 func (l *ewfLayout) parseVolume(path string, data []byte) error {
-	if len(data) < ewfVolumeLen {
-		return fmt.Errorf("ewf: %s: volume section too short (%d bytes)", path, len(data))
+	var span int
+	switch {
+	case len(data) >= ewfVolumeLen:
+		span = ewfVolumeLen
+	case len(data) == ewfSmartVolumeLen && bytes.Equal(data[85:90], ewfSmartMarker):
+		span = ewfSmartVolumeLen
+	default:
+		return fmt.Errorf("ewf: %s: volume section too short (%d bytes, want %d or SMART %d)", path, len(data), ewfVolumeLen, ewfSmartVolumeLen)
 	}
-	if adler32.Checksum(data[:ewfVolumeLen-4]) != binary.LittleEndian.Uint32(data[ewfVolumeLen-4:ewfVolumeLen]) {
+	if adler32.Checksum(data[:span-4]) != binary.LittleEndian.Uint32(data[span-4:span]) {
 		return fmt.Errorf("ewf: %s: volume checksum mismatch", path)
 	}
 	chunks := binary.LittleEndian.Uint32(data[4:8])
@@ -270,8 +319,12 @@ func (l *ewfLayout) parseVolume(path string, data []byte) error {
 	return nil
 }
 
-// parseTable binds one table section to its sectors section, appending chunks.
-func (l *ewfLayout) parseTable(path string, segNum int, data []byte, _ int64, sectorsDesc, sectorsEnd int64) error {
+// parseTable binds one table section to its chunk data, appending chunks.
+// E01 tables point into the segment's sectors section (base-relative
+// offsets, offset-array checksum). SMART tables carry the chunk data
+// themselves (absolute file offsets, no array checksum, last chunk ends
+// at the table section end). off is the table descriptor's file offset.
+func (l *ewfLayout) parseTable(path string, segNum int, data []byte, off int64, sectorsDesc, sectorsEnd int64) error {
 	if len(data) < ewfTableHeadLen {
 		return fmt.Errorf("ewf: %s: table section too short", path)
 	}
@@ -280,13 +333,32 @@ func (l *ewfLayout) parseTable(path string, segNum int, data []byte, _ int64, se
 	if adler32.Checksum(data[:20]) != binary.LittleEndian.Uint32(data[20:24]) {
 		return fmt.Errorf("ewf: %s: table header checksum mismatch", path)
 	}
-	want := ewfTableHeadLen + int64(n)*4 + 4
+	smart := sectorsDesc < 0
+	if smart && l.flavor != "smart" {
+		return fmt.Errorf("ewf: %s: table section without sectors", path)
+	}
+	want := ewfTableHeadLen + int64(n)*4
+	var arrEnd int64
+	if smart {
+		arrEnd = off + ewfSectionDesc + int64(len(data))
+	} else {
+		want += 4
+		arrEnd = sectorsEnd
+	}
 	if int64(len(data)) < want {
 		return fmt.Errorf("ewf: %s: table truncated (%d bytes, want %d)", path, len(data), want)
 	}
 	arr := data[ewfTableHeadLen : ewfTableHeadLen+int64(n)*4]
-	if adler32.Checksum(arr) != binary.LittleEndian.Uint32(data[ewfTableHeadLen+int64(n)*4:]) {
-		return fmt.Errorf("ewf: %s: table offset checksum mismatch", path)
+	if !smart {
+		if adler32.Checksum(arr) != binary.LittleEndian.Uint32(data[ewfTableHeadLen+int64(n)*4:]) {
+			return fmt.Errorf("ewf: %s: table offset checksum mismatch", path)
+		}
+	}
+	regionStart := sectorsDesc + ewfSectionDesc
+	regionName := "sectors"
+	if smart {
+		regionStart = off + ewfSectionDesc + ewfTableHeadLen + int64(n)*4
+		regionName = "table"
 	}
 	prev := int64(-1)
 	for i := int64(0); i < int64(n); i++ {
@@ -296,11 +368,11 @@ func (l *ewfLayout) parseTable(path string, segNum int, data []byte, _ int64, se
 		if i+1 < int64(n) {
 			end = base + int64(binary.LittleEndian.Uint32(arr[i*4+4:i*4+8])&0x7fffffff)
 		} else {
-			end = sectorsEnd
+			end = arrEnd
 		}
-		if start < sectorsDesc+ewfSectionDesc || end > sectorsEnd || end <= start {
-			return fmt.Errorf("ewf: %s: chunk %d span [%d,%d) outside sectors section",
-				path, len(l.chunks), start, end)
+		if start < regionStart || end > arrEnd || end <= start {
+			return fmt.Errorf("ewf: %s: chunk %d span [%d,%d) outside %s section",
+				path, len(l.chunks), start, end, regionName)
 		}
 		if start <= prev {
 			return fmt.Errorf("ewf: %s: chunk %d offsets not increasing", path, len(l.chunks))
@@ -468,7 +540,20 @@ func (r *ewfReader) chunk(idx int64) ([]byte, error) {
 		}
 		decoded = body
 	}
-	if int64(len(decoded)) != r.layout.chunkBytes {
+	if last := int64(len(r.layout.chunks)) - 1; idx == last {
+		// The final chunk is full or holds exactly the media
+		// remainder: E01 writers pad, SMART writers do not, and the
+		// volume's media size bounds reads either way.
+		rest := r.layout.mediaSize - idx*r.layout.chunkBytes
+		if rest <= 0 || rest > r.layout.chunkBytes {
+			return nil, fmt.Errorf("ewf: volume media size %d inconsistent with %d chunks",
+				r.layout.mediaSize, len(r.layout.chunks))
+		}
+		if int64(len(decoded)) != r.layout.chunkBytes && int64(len(decoded)) != rest {
+			return nil, fmt.Errorf("ewf: chunk %d: decoded %d bytes, want %d or %d",
+				idx, len(decoded), r.layout.chunkBytes, rest)
+		}
+	} else if int64(len(decoded)) != r.layout.chunkBytes {
 		return nil, fmt.Errorf("ewf: chunk %d: decoded %d bytes, want %d",
 			idx, len(decoded), r.layout.chunkBytes)
 	}

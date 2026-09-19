@@ -36,11 +36,21 @@ Point findbtc at the image and keep a case log:
 
 Supported inputs, detected automatically:
 
-- **EnCase E01** (pass the `.E01`; `.E02`, … follow). Compressed and
-  stored chunks, single- and multi-segment sets. `EWF2` (`Ex01`) and
-  SMART (`S01`) sets are refused, not misread. The scan hashes the
-  *decoded* media bytes and cross-checks them against the set's stored
-  MD5 (`ewf.md5_match` in the case log).
+- **EnCase E01** (pass the `.E01`; `.E02`, … follow) and **SMART S01**
+  (pass the `.s01`; `.s02`, … follow). Compressed and stored chunks,
+  single- and multi-segment sets. The scan hashes the *decoded* media
+  bytes and cross-checks them against the set's stored MD5
+  (`ewf.md5_match` in the case log). Layout notes: the S01 volume is
+  94 bytes (same leading geometry, `SMART` marker, trailing checksum)
+  and its table section carries chunk data inline with absolute file
+  offsets — no sectors section; both layouts verified byte-for-byte
+  against `ewfexport`.
+- **EWF2 (`Ex01`/`Lx01`) is refused, not misread** (`EVF2` magic,
+  compressed metadata — a different format family). Convert first
+  with libewf and scan the raw output:
+
+      ewfexport -u -t evidence -f raw evidence.Ex01
+      findbtc -json evidence.raw > hits.jsonl
 - **Split raw** (`base.001`, `base.002`, …): concatenated and scanned
   as one stream; any segment may be named on the command line.
 - **Raw** devices and files, as before.

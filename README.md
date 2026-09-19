@@ -216,9 +216,10 @@ the sweep, and each file appends its own case-log record. See the
 
 ### Forensic casework
 
-EnCase E01 sets (pass the `.E01`) and split raw images (`base.001`, …)
-scan directly, with E01 bytes cross-checked against the set's stored
-MD5. `-case-log` records source hashes, flags, bad-sector ranges, and
+EnCase E01 and SMART S01 sets (pass the `.E01`/`.s01`) and split raw
+images (`base.001`, …) scan directly, with decoded bytes cross-checked
+against the set's stored MD5. EWF2 (`Ex01`/`Lx01`) is refused with a
+conversion pointer — see [docs/FORENSICS.md](docs/FORENSICS.md). `-case-log` records source hashes, flags, bad-sector ranges, and
 counts per scan; `-verify-case-log` re-hashes the evidence behind the
 log so a reviewer can confirm nothing changed; `-dfxml` exports hits
 as DFXML 1.1.1 for Autopsy and case pipelines:
