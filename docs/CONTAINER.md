@@ -4,12 +4,13 @@ Labs that standardize on pinned container images should use
 `ghcr.io/pauljones0/findbtc`, published by the tag release workflow.
 Pull it digest-pinned and scan a mounted evidence file:
 
-    docker pull ghcr.io/pauljones0/findbtc:vX.Y.Z
+    docker pull ghcr.io/pauljones0/findbtc:X.Y.Z
     docker pull ghcr.io/pauljones0/findbtc@sha256:<digest from the release notes>
     docker run --rm -v ./evidence:/evidence:ro \
       ghcr.io/pauljones0/findbtc@sha256:<digest> /evidence/disk.img
 
-Tags per release: the version (`vX.Y.Z`) and `latest`. Pin the digest
+Tags per release: the version without the `v` prefix (`X.Y.Z`, e.g.
+`0.2.0`, matching the archive names) and `latest`. Pin the digest
 for casework — `latest` moves.
 
 ## Image facts
@@ -26,7 +27,7 @@ Raw-device scans need the device plus privileges (drop back to root
 for the device nodes):
 
     docker run --rm --privileged --user 0 \
-      -v /dev:/dev:ro ghcr.io/pauljones0/findbtc:vX.Y.Z /dev/sda
+      -v /dev:/dev:ro ghcr.io/pauljones0/findbtc:X.Y.Z /dev/sda
 
 Prefer carving and case logs onto a mounted volume, never onto the
 evidence mount.
