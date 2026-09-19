@@ -8,9 +8,13 @@ provenance. Verify a download before trusting it with evidence.
 
 Each platform archive (`findbtc_<version>_<os>_<arch>.tar.gz`,
 `.zip` on Windows) holds the `findbtc` binary plus `LICENSE` and
-`README.md`. Alongside the archives, the release page carries:
+`README.md`. Linux users should prefer the managed packages
+(`findbtc_<version>_linux_<arch>.deb` / `.rpm`, per arch), which
+install the binary to `/usr/bin` plus docs under
+`/usr/share/doc/findbtc`. Alongside the archives, the release page
+carries:
 
-- `checksums.txt` — SHA-256 of every archive and SBOM.
+- `checksums.txt` — SHA-256 of every archive, package, and SBOM.
 - `<archive>.sbom.json` — SPDX 2.3 software bill of materials per
   archive (the binary is nearly dependency-free: Go stdlib plus
   `golang.org/x/sys`).

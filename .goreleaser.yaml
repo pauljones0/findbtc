@@ -3,13 +3,24 @@ version: 2
 project_name: findbtc
 
 builds:
+  # Split by OS so the nFPM packages below wrap only Linux binaries.
+  # Archive names are unchanged (name_template uses .Os/.Arch).
   - id: findbtc
     main: .
     binary: findbtc
     goos:
-      - linux
       - darwin
       - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+  - id: findbtc-linux
+    main: .
+    binary: findbtc
+    goos:
+      - linux
     goarch:
       - amd64
       - arm64
@@ -33,6 +44,26 @@ checksum:
 # SPDX SBOM per archive, generated with syft (installed by release.yml).
 sboms:
   - artifacts: archive
+
+# Managed install path for labs: deb + rpm per Linux arch, built by the
+# bundled nFPM (no rpmbuild/dpkg needed). Binary lands in /usr/bin.
+nfpms:
+  - id: findbtc
+    package_name: findbtc
+    ids:
+      - findbtc-linux
+    formats:
+      - deb
+      - rpm
+    maintainer: Paul Jones <32859666+pauljones0@users.noreply.github.com>
+    description: Find BTC wallets by scanning raw block devices
+    homepage: https://github.com/pauljones0/findbtc
+    license: GPL-3.0-or-later
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/findbtc/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/findbtc/README.md
 
 # The cask file is generated into dist/ but not pushed: the tap repo does
 # not exist yet. Create an empty public repo named homebrew-findbtc under

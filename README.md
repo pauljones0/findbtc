@@ -33,8 +33,13 @@ verify its checksum:
     sha256sum -c checksums.txt
 
 Release artifacts also carry Sigstore build-provenance attestations, verifiable
-with `gh attestation verify` (see [docs/RELEASE.md](docs/RELEASE.md)). There
-is no Homebrew tap yet, so macOS users should install from the release
+with `gh attestation verify` (see [docs/RELEASE.md](docs/RELEASE.md)).
+On Linux, prefer the managed packages over the archives:
+
+    sudo apt install ./findbtc_*_linux_amd64.deb   # Debian/Ubuntu
+    sudo dnf install ./findbtc_*_linux_amd64.rpm   # Fedora/RHEL
+
+There is no Homebrew tap yet, so macOS users should install from the release
 archives.
 
 Since this is potentially sensitive software, you are encouraged to build it

@@ -504,9 +504,9 @@ users get no managed install/upgrade path, which is table stakes for
 lab deployment.
 
 **Completely solved when:**
-- [ ] GoReleaser builds deb+rpm via nFPM; snapshot build proven locally
+- [x] GoReleaser builds deb+rpm via nFPM; snapshot build proven locally
       and the next tag publishes working packages.
-- [ ] Container install + `-version` + fixture scan passes from the
+- [x] Container install + `-version` + fixture scan passes from the
       built deb.
 
 **Execute:**
