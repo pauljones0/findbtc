@@ -481,10 +481,10 @@ over from zero after any interruption — hours lost on exactly the
 longest runs.
 
 **Completely solved when:**
-- [ ] The journal records `(range_index, offset)`; resume validates the
+- [x] The journal records `(range_index, offset)`; resume validates the
       range list still matches before continuing, and refuses loudly on
       mismatch.
-- [ ] Kill mid-run → resume → byte-identical detection set vs an
+- [x] Kill mid-run → resume → byte-identical detection set vs an
       uninterrupted run, proven by test.
 
 **Execute:**

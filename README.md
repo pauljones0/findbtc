@@ -193,7 +193,9 @@ scans deleted files' content with filenames stamped on every hit, while
 For full-disk captures, omit `-fs-offset` and the MBR/GPT partition
 table is followed automatically (every NTFS/ext partition is scanned);
 pass `-fs-offset` only to pin one volume boot sector by hand.
-`-checkpoint`/`-resume` do not apply to range scans. Reports show
+Range scans take `-checkpoint`/`-resume` too: the journal records
+`(range_index, offset)`, and resume refuses loudly if the volume's
+range list changed since. Reports show
 `file=` for attributed hits. SSDs
 with TRIM erase freed blocks within seconds — metadata then names files
 whose bytes are gone; see [docs/FILESYSTEMS.md](docs/FILESYSTEMS.md).

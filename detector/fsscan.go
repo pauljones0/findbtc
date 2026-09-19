@@ -95,6 +95,9 @@ func ScanFSVolumes(path string, base int64, autoSeed bool, opts Options, onDetec
 	if err != nil {
 		return nil, err
 	}
+	if len(targets) > 1 && (opts.CheckpointPath != "" || opts.Resume) {
+		return nil, fmt.Errorf("%s: checkpointing is not supported across %d auto-seeded volumes in one journal; pin one volume with -fs-offset", path, len(targets))
+	}
 	var kinds []string
 	for _, t := range targets {
 		kind, err := scanOneVolume(path, t.base, opts, onDetection, onProgress, onEntry)
@@ -128,6 +131,12 @@ func scanOneVolume(path string, base int64, opts Options, onDetection func(Detec
 			onEntry(kind, e)
 		}
 	}
+	// Deleted entries scan as one flattened range list (not one journal
+	// per entry), so a single (range_index, offset) journal covers the
+	// whole volume and resume validates the full list. Filenames stamp
+	// by range ownership instead of by per-entry closure.
+	var ranges []FSExtent
+	var owners []string
 	for _, e := range entries {
 		if !e.Deleted || len(e.Extents) == 0 {
 			continue
@@ -136,14 +145,28 @@ func scanOneVolume(path string, base int64, opts Options, onDetection func(Detec
 		if label == "" {
 			label = e.Note
 		}
-		name := label
-		err := ScanRangesWithOptions(path, e.Extents, opts, func(d Detection) {
-			d.FileName = name
-			onDetection(d)
-		}, onProgress)
-		if err != nil {
-			return kind, fmt.Errorf("scanning %s: %w", label, err)
+		ranges = append(ranges, e.Extents...)
+		for range e.Extents {
+			owners = append(owners, label)
 		}
+	}
+	if len(ranges) == 0 {
+		return kind, nil
+	}
+	ownerOf := func(offset int64) string {
+		for i, r := range ranges {
+			if offset >= r.Start && offset < r.Start+r.Len {
+				return owners[i]
+			}
+		}
+		return ""
+	}
+	err = ScanRangesWithOptions(path, ranges, opts, func(d Detection) {
+		d.FileName = ownerOf(d.Offset)
+		onDetection(d)
+	}, onProgress)
+	if err != nil {
+		return kind, err
 	}
 	return kind, nil
 }

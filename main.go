@@ -93,11 +93,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *fsPath != "" {
-		if *resume || *checkpointPath != "" {
-			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -checkpoint and -resume are not supported with -fs")
-			os.Exit(1)
-		}
-		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog)
+		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume)
 		return
 	}
 	if *walkPath != "" {
@@ -115,17 +111,19 @@ func main() {
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-extract-dir DIR [-context BYTES]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
 
 	start := *startOffset
-	if *resume {
-		if *checkpointPath == "" {
-			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -resume requires -checkpoint")
-			os.Exit(1)
-		}
+	if *resume && *checkpointPath == "" {
+		fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -resume requires -checkpoint")
+		os.Exit(1)
+	}
+	// Range scans (-unallocated-only) resume inside the detector, which
+	// validates the range list; only single-target scans resume here.
+	if *resume && !*unallocatedOnly {
 		cp, err := detector.ReadCheckpoint(*checkpointPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -139,12 +137,16 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: checkpoint is for %s, not %s\n", cp.Path, path)
 				os.Exit(1)
 			}
+			if len(cp.Ranges) > 0 {
+				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: checkpoint is a range-scan journal; resume it with -fs or -unallocated-only\n")
+				os.Exit(1)
+			}
 			start = cp.Offset
 			fmt.Fprintf(os.Stderr, "[main] Resuming %s at byte offset %d\n", path, start)
 		}
 	}
 
-	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:]}
+	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume}
 	printDetection := func(detection detector.Detection) {
 		if *jsonOut {
 			line, err := json.Marshal(detection)
@@ -189,12 +191,9 @@ func main() {
 
 // runUnallocated implements --unallocated-only: scan just the free space
 // of the NTFS/ext volume at fsOffset, or of every NTFS/ext volume on the
-// disk when autoSeed follows the partition table. Checkpointing is
-// refused: a single offset cannot resume a range list.
+// disk when autoSeed follows the partition table. The merged range list
+// journals (range_index, offset); resume validates the list still matches.
 func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opts detector.Options, onDetection func(detector.Detection)) error {
-	if opts.CheckpointPath != "" {
-		return fmt.Errorf("-checkpoint and -resume are not supported with -unallocated-only")
-	}
 	kinds, free, err := detector.UnallocatedRangesAuto(path, fsOffset, autoSeed)
 	if err != nil {
 		return err
@@ -224,8 +223,8 @@ func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opt
 // runFS implements filesystem-aware mode: inventory live and deleted
 // entries with names, then scan deleted entries' content with filenames
 // stamped on every hit.
-func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string) {
-	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:]}
+func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, checkpointPath string, resume bool) {
+	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], CheckpointPath: checkpointPath, Resume: resume}
 	_, err := detector.ScanFSVolumes(path, fsOffset, autoSeed, opts, func(detection detector.Detection) {
 		if jsonOut {
 			line, err := json.Marshal(detection)

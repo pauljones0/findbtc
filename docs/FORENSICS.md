@@ -62,6 +62,19 @@ Long scans should add `-checkpoint case.checkpoint`: an interrupted
 run resumes with `-resume` instead of restarting. The case log records
 the checkpoint path and the resume offset.
 
+Range scans (`-fs` over one volume, `-unallocated-only`) journal
+`(range_index, offset)` the same way. Resume first checks the journal's
+range list still matches the volume's exactly — a changed filesystem
+refuses loudly rather than silently skipping bytes, so re-image and
+start over if the evidence moved. The resumed range rewinds to its 4kB
+block grid just before the journal point, so patterns straddling the
+interruption still match and the resumed detection set is identical to
+an uninterrupted run (the re-scanned window may re-report hits already
+printed before the kill — deduplicate by `(needle, offset)` when
+merging outputs). One journal holds one range list: checkpointing is
+refused across several auto-seeded volumes in one `-fs` run — pin one
+volume with `-fs-offset` and journal each volume separately.
+
 ## 4. Read the case log
 
 `-case-log case.jsonl` appends one JSON record per scan:

@@ -2,6 +2,7 @@ package detector
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -125,12 +126,28 @@ func TestScanRangesSkipsLive(t *testing.T) {
 	}
 }
 
-func TestScanRangesCheckpointRefused(t *testing.T) {
+// A checkpointed -fs run over one volume journals the flattened deleted-
+// entry list, and resuming from the completion journal scans nothing.
+func TestScanFSVolumesSingleVolumeCheckpointRoundTrip(t *testing.T) {
 	path := buildTestExt(t)
-	err := ScanRangesWithOptions(path, []FSExtent{{Start: 0, Len: 4096}},
-		Options{CheckpointPath: t.TempDir() + "/cp"}, func(Detection) {}, func(ProgressInfo) {})
-	if err == nil {
-		t.Error("checkpoint with range scans must be refused")
+	ckpt := filepath.Join(t.TempDir(), "cp.json")
+	collect := func(opts Options) []Detection {
+		var dets []Detection
+		if _, err := ScanFSVolumes(path, 0, false, opts,
+			func(d Detection) { dets = append(dets, d) },
+			func(ProgressInfo) {}, func(string, FSEntry) {}); err != nil {
+			t.Fatalf("fs scan: %v", err)
+		}
+		return dets
+	}
+	if dets := collect(Options{CheckpointPath: ckpt}); len(dets) == 0 {
+		t.Fatal("checkpointed fs scan found nothing")
+	}
+	if _, err := ReadCheckpoint(ckpt); err != nil {
+		t.Fatalf("fs run must leave a journal: %v", err)
+	}
+	if dets := collect(Options{CheckpointPath: ckpt, Resume: true}); len(dets) != 0 {
+		t.Errorf("resuming a completed fs journal must scan nothing, got %v", dets)
 	}
 }
 

@@ -197,6 +197,14 @@ type Options struct {
 	// CheckpointPath, when non-empty, journals root-target progress to the
 	// file every 1MB and on completion, so an interrupted scan can resume.
 	CheckpointPath string
+	// Resume continues a range scan (ScanRangesWithOptions) from the
+	// CheckpointPath journal instead of starting over. Single-target
+	// resume is handled by the caller (read the journal, pass the
+	// offset); this flag is ignored outside range scans.
+	Resume bool
+	// rangeCtx carries range-journal state into runPipeline; set by
+	// ScanRangesWithOptions, never by callers.
+	rangeCtx *rangeJournalCtx
 	// Reveal, when true, attaches seed-phrase words to BIP39 detections
 	// (owner recovery only). Default output never contains words.
 	Reveal bool
@@ -256,11 +264,21 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 	return runPipeline(target, opts, onDetection, onProgress)
 }
 
+// rangeJournalCtx identifies one range within a journaled range scan.
+type rangeJournalCtx struct {
+	ranges []FSExtent
+	index  int
+}
+
 // ScanRangesWithOptions scans isolated byte ranges of one file (filesystem
 // unallocated extents, deleted-file runs) as sequential pipelines: the
 // completion protocol assumes a single root target, so ranges cannot share
-// one. Checkpointing is refused: a single offset cannot resume a range
-// list. Carves near range edges clamp to the range.
+// one. Carves near range edges clamp to the range.
+//
+// With CheckpointPath set, every range journals (range_index, offset) each
+// 1MB and on completion. With Resume, the journal's range list must match
+// exactly or resume refuses loudly; the resumed range rewinds to its
+// block grid at/before offset-overlap so straddling patterns still match.
 func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("cannot scan %s: %w", path, err)
@@ -270,19 +288,118 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
 		}
 	}
-	if opts.CheckpointPath != "" {
-		return fmt.Errorf("checkpointing is not supported for range scans")
+	startIdx := 0
+	var startOff int64 = -1
+	if opts.Resume {
+		if opts.CheckpointPath == "" {
+			return fmt.Errorf("resume requires a checkpoint path")
+		}
+		idx, off, resume, err := readRangeResume(opts.CheckpointPath, path, ranges)
+		if err != nil {
+			return err
+		}
+		if !resume {
+			return nil // journal says the list already completed
+		}
+		startIdx, startOff = idx, off
 	}
-	for _, r := range ranges {
+	for i := startIdx; i < len(ranges); i++ {
+		r := ranges[i]
 		if r.Len <= 0 {
 			continue
 		}
-		t := &boundedScanTarget{path: path, start: r.Start, length: r.Len}
-		if err := runPipeline(t, opts, onDetection, onProgress); err != nil {
+		start := r.Start
+		if i == startIdx && startOff >= 0 {
+			if startOff >= r.Start+r.Len {
+				continue // journaled at/past the end: range done
+			}
+			start = rewindOffset(r.Start, startOff)
+		}
+		t := &boundedScanTarget{path: path, start: start, length: r.Start + r.Len - start}
+		ropts := opts
+		ropts.Resume = false
+		if opts.CheckpointPath != "" {
+			ropts.rangeCtx = &rangeJournalCtx{ranges: ranges, index: i}
+		}
+		if err := runPipeline(t, ropts, onDetection, onProgress); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// rewindOffset backs a resume point to its range's block grid at or before
+// offset-overlap, so resumed blocks align with the original grid (keeping
+// block_offset identical) while still covering patterns that straddle the
+// journal point.
+func rewindOffset(rangeStart, offset int64) int64 {
+	back := offset - int64(scanOverlap())
+	if back <= rangeStart {
+		return rangeStart
+	}
+	return rangeStart + ((back-rangeStart)/blockSize)*blockSize
+}
+
+// readRangeResume loads and validates a range journal: path, exact range
+// list, index bounds, offset within the range. It returns the range index
+// and offset to continue from; resume=false means the journal records a
+// completed list. A missing journal starts over (like single-target
+// resume); anything corrupt or mismatched refuses loudly.
+func readRangeResume(file, path string, ranges []FSExtent) (idx int, off int64, resume bool, err error) {
+	cp, err := ReadCheckpoint(file)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[checkpoint] No checkpoint at %s, starting from the beginning\n", file)
+			return 0, -1, true, nil
+		}
+		return 0, 0, false, err
+	}
+	if cp.Path != path {
+		return 0, 0, false, fmt.Errorf("checkpoint is for %s, not %s: refusing to resume", cp.Path, path)
+	}
+	if len(cp.Ranges) == 0 {
+		return 0, 0, false, fmt.Errorf("checkpoint %s has no range list (single-target journal?): refusing to resume a range scan", file)
+	}
+	if firstDiff := firstRangeDiff(cp.Ranges, ranges); firstDiff >= 0 {
+		return 0, 0, false, fmt.Errorf("checkpoint range list does not match (first difference at range %d): the volume changed; refusing to resume", firstDiff)
+	}
+	if cp.RangeIndex > len(ranges) {
+		return 0, 0, false, fmt.Errorf("checkpoint range index %d beyond %d ranges: refusing to resume", cp.RangeIndex, len(ranges))
+	}
+	if cp.RangeIndex == len(ranges) {
+		return 0, 0, false, nil
+	}
+	r := ranges[cp.RangeIndex]
+	if cp.Offset < r.Start || cp.Offset > r.Start+r.Len {
+		return 0, 0, false, fmt.Errorf("checkpoint offset %d outside range %d [%d,%d): refusing to resume",
+			cp.Offset, cp.RangeIndex, r.Start, r.Start+r.Len)
+	}
+	return cp.RangeIndex, cp.Offset, true, nil
+}
+
+// writeScanCheckpoint journals root-target progress: a range entry when
+// the pipeline runs inside ScanRangesWithOptions, a legacy entry
+// otherwise.
+func writeScanCheckpoint(opts Options, target scanTarget, offset int64) {
+	if opts.rangeCtx != nil {
+		writeCheckpointRange(opts.CheckpointPath, target.Describe(), opts.rangeCtx.ranges, opts.rangeCtx.index, offset)
+		return
+	}
+	writeCheckpoint(opts.CheckpointPath, target.Describe(), offset)
+}
+
+// firstRangeDiff returns the first index where two range lists differ, or
+// -1 when they match exactly.
+func firstRangeDiff(a, b []FSExtent) int {
+	if len(a) != len(b) {
+		return min(len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+	return -1
 }
 
 // runPipeline runs one scan target through the full detection pipeline.
@@ -502,7 +619,7 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 				blocksSinceCheckpoint++
 				if blocksSinceCheckpoint >= checkpointBlockInterval {
 					blocksSinceCheckpoint = 0
-					writeCheckpoint(opts.CheckpointPath, target.Describe(), currentOffset)
+					writeScanCheckpoint(opts, target, currentOffset)
 				}
 			}
 
@@ -528,7 +645,7 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 
 	nextTarget:
 		if checkpointRoot && opts.CheckpointPath != "" && f != nil {
-			writeCheckpoint(opts.CheckpointPath, target.Describe(), currentOffset)
+			writeScanCheckpoint(opts, target, currentOffset)
 		}
 		// Close before signalling EOF downstream: the completion races
 		// ahead, and on Windows an open handle blocks deleting the file
