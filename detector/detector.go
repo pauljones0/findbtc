@@ -237,7 +237,21 @@ func readRetryBackoff(attempt int) time.Duration {
 	return time.Duration(attempt) * 50 * time.Millisecond
 }
 
+// withDefaultCallbacks replaces nil scan callbacks with no-ops, so
+// library callers pass nil for streams they ignore instead of
+// remembering empty closures.
+func withDefaultCallbacks(onDetection func(Detection), onProgress func(ProgressInfo)) (func(Detection), func(ProgressInfo)) {
+	if onDetection == nil {
+		onDetection = func(Detection) {}
+	}
+	if onProgress == nil {
+		onProgress = func(ProgressInfo) {}
+	}
+	return onDetection, onProgress
+}
+
 // Scan runs the detection system with default options; see ScanWithOptions.
+// Either callback may be nil.
 func Scan(startOffset int64, path string, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	return ScanWithOptions(startOffset, path, Options{}, onDetection, onProgress)
 }
@@ -247,8 +261,10 @@ func Scan(startOffset int64, path string, onDetection func(Detection), onProgres
 // be a raw device file handle, like /dev/sdb or some such; the system
 // would then scan every sector of that device. Forensic images are
 // accepted too: EnCase E01 sets (pass the .E01) decode transparently,
-// and split raw sets (base.001, base.002, ...) concatenate.
+// and split raw sets (base.001, base.002, ...) concatenate. Either
+// callback may be nil.
 func ScanWithOptions(startOffset int64, path string, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("cannot scan %s: %w", path, err)
 	}
@@ -279,7 +295,9 @@ type rangeJournalCtx struct {
 // 1MB and on completion. With Resume, the journal's range list must match
 // exactly or resume refuses loudly; the resumed range rewinds to its
 // block grid at/before offset-overlap so straddling patterns still match.
+// Either callback may be nil.
 func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("cannot scan %s: %w", path, err)
 	}

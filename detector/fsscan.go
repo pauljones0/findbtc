@@ -77,7 +77,8 @@ func resolveVolumes(path string, base int64, autoSeed bool) ([]volumeTarget, err
 // content ranges, stamping each detection with its filename (or metadata
 // note when the name is lost). Live entries are inventoried but not
 // scanned: raw scanning already covers live content. onEntry observes
-// every entry for the inventory; onDetection observes content hits.
+// every entry for the inventory; onDetection observes content hits. Any
+// callback may be nil.
 func ScanFS(path string, base int64, opts Options, onDetection func(Detection), onProgress func(ProgressInfo), onEntry func(kind string, e FSEntry)) (string, error) {
 	kinds, err := ScanFSVolumes(path, base, false, opts, onDetection, onProgress, onEntry)
 	if err != nil {
@@ -89,8 +90,10 @@ func ScanFS(path string, base int64, opts Options, onDetection func(Detection), 
 // ScanFSVolumes scans one volume (autoSeed false, at base) or every
 // NTFS/ext volume found by following the partition table (autoSeed true,
 // falling back to the volume at base when one opens there). It returns
-// the kind label of each volume scanned, in scan order.
+// the kind label of each volume scanned, in scan order. Any callback may
+// be nil.
 func ScanFSVolumes(path string, base int64, autoSeed bool, opts Options, onDetection func(Detection), onProgress func(ProgressInfo), onEntry func(kind string, e FSEntry)) ([]string, error) {
+	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	targets, err := resolveVolumes(path, base, autoSeed)
 	if err != nil {
 		return nil, err

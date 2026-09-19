@@ -527,11 +527,11 @@ stability statement — so every integrator reverse-engineers
 `ScanWithOptions` from the CLI source.
 
 **Completely solved when:**
-- [ ] `doc.go` with an end-to-end example (scan bytes → handle
+- [x] `doc.go` with an end-to-end example (scan bytes → handle
       detections) that compiles under `go test` (`Example*`).
-- [ ] `Options`/`Detection` stability tiers documented; `Detection`
+- [x] `Options`/`Detection` stability tiers documented; `Detection`
       JSON tags frozen per the Goal 11 schema.
-- [ ] A second reader follows the example without asking questions
+- [x] A second reader follows the example without asking questions
       (review bar, not a test).
 
 **Execute:**

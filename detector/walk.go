@@ -71,9 +71,11 @@ func (s *WalkStats) fail(path string, err error) {
 // Walk scans the file or directory tree at root. It returns stats and a
 // nil error whenever the sweep itself ran; per-file failures land in
 // stats, never in the returned error. A non-nil error means the walk
-// could not start (bad root, checkpoint requested).
+// could not start (bad root, checkpoint requested). Either callback may
+// be nil.
 func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgress func(ProgressInfo)) (WalkStats, error) {
 	var stats WalkStats
+	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if wopts.Scan.CheckpointPath != "" {
 		return stats, fmt.Errorf("checkpointing is not supported for directory sweeps (a single offset cannot resume a file list)")
 	}
