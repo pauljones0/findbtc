@@ -164,6 +164,16 @@
         "ordered": {
           "type": "boolean",
           "description": "True when the image is in file order."
+        },
+        "verdict": {
+          "type": "string",
+          "enum": ["valid", "suspect"],
+          "description": "Structural open-prediction: valid (worth opening) or suspect (a lead, not a database). Absent on sidecars that predate validation."
+        },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Human-readable reasons for a suspect verdict; empty when valid."
         }
       }
     },

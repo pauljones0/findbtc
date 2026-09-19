@@ -43,8 +43,8 @@ completely solve the pain point?"**
 | 22 | Pipeline ingest evaluation | complete | 2525e43 |
 | 23 | Owner "what's next" guide + anti-scam shield | complete | 4bed9b8 |
 | 24 | Exit-on-hit + CI gating | complete | 0bb1793 |
-| 25 | FAT/exFAT filesystem support | complete | - |
-| 26 | Salvage validation | queued | - |
+| 25 | FAT/exFAT filesystem support | complete | 61abf5b |
+| 26 | Salvage validation | complete | - |
 | 27 | Guided mode (-advise) | queued | - |
 | 28 | Embedding pass (quiet + cancel) | queued | - |
 | 29 | Baseline/allowlist for repeat sweeps | queued | - |
@@ -718,11 +718,11 @@ step — after the user has built hope on it. SQLite order is already
 documented-uncertain except for page-1-led runs.
 
 **Completely solved when:**
-- [ ] Every salvaged run carries a valid/suspect verdict from
+- [x] Every salvaged run carries a valid/suspect verdict from
       structural validation (SQLite header, page-size, btree cell
       bounds; BDB page headers + pgno sequence), surfaced in the
       sidecar and `-report`.
-- [ ] Validator verdicts match real `sqlite3`/`db_verify` open-checks
+- [x] Validator verdicts match real `sqlite3`/`db_verify` open-checks
       on the fixture set (independent oracles).
 
 **Execute:**

@@ -60,6 +60,13 @@ type SalvageInfo struct {
 	// Ordered means the image is in file order (BDB: always, via pgno;
 	// SQLite: only for a single page-1-led run).
 	Ordered bool `json:"ordered"`
+	// Verdict predicts whether the image opens in the real database
+	// tool: "valid" (worth opening) or "suspect" (a lead, not a
+	// database). Reasons explains a suspect verdict; empty when
+	// valid. Optional for backward compatibility with sidecars that
+	// predate validation.
+	Verdict string   `json:"verdict,omitempty"`
+	Reasons []string `json:"reasons,omitempty"`
 }
 
 // SalvageResult bundles the info with the assembled image bytes.
@@ -76,10 +83,15 @@ func Salvage(data []byte, baseAbs int64) *SalvageResult {
 	if len(data) == 0 || len(data) > SalvageMaxBytes {
 		return nil
 	}
-	if r := salvageBDB(data, baseAbs); r != nil {
-		return r
+	var r *SalvageResult
+	if r = salvageBDB(data, baseAbs); r == nil {
+		r = salvageSQLite(data, baseAbs)
 	}
-	return salvageSQLite(data, baseAbs)
+	if r == nil {
+		return nil
+	}
+	r.Info.Verdict, r.Info.Reasons = ValidateSalvage(r.Info, r.Image)
+	return r
 }
 
 // ---------------------------------------------------------------------------

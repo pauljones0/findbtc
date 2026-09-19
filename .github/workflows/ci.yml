@@ -19,6 +19,9 @@ jobs:
       - name: gofmt
         shell: bash
         run: test -z "$(gofmt -l .)"
+      - name: oracle tools (BDB cross-check)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq db5.3-util
       - name: build
         run: go build ./...
       - name: vet

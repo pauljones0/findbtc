@@ -239,6 +239,11 @@ func TestScanCarveSalvages(t *testing.T) {
 	if s == nil || len(s.Pages) != 2 || !s.Complete || !s.Ordered {
 		t.Fatalf("salvage = %+v", s)
 	}
+	// Synthetic filler pages are structurally incomplete: the verdict
+	// must say suspect, not valid.
+	if s.Verdict != SalvageSuspect || len(s.Reasons) == 0 {
+		t.Errorf("salvage verdict = %q reasons %v, want suspect", s.Verdict, s.Reasons)
+	}
 	raw, err := os.ReadFile(filepath.Join(carveDir, "hit-000001.salvage.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -252,5 +257,8 @@ func TestScanCarveSalvages(t *testing.T) {
 	}
 	if !strings.Contains(string(sidecar), `"salvage"`) {
 		t.Errorf("sidecar lacks salvage:\n%s", sidecar)
+	}
+	if !strings.Contains(string(sidecar), `"verdict": "suspect"`) || !strings.Contains(string(sidecar), `"reasons"`) {
+		t.Errorf("sidecar lacks verdict/reasons:\n%s", sidecar)
 	}
 }

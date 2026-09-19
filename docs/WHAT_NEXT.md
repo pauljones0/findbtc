@@ -60,7 +60,9 @@ that spot. Markers alone spend nothing — they say "dig here".
 Open the sidecar (`hit-NNNNNN.json`): it classifies the carved bytes
 (`bdb`, `sqlite`, ...). If the carve holds database pages, findbtc
 reassembles them automatically into `hit-NNNNNN.salvage.db` — see
-"Fragment salvage" in the README. Then re-scan the carve: nearby
+"Fragment salvage" in the README. Check the sidecar's `verdict`
+first: `valid` is worth opening, `suspect` (with `reasons`) is a
+lead, not a database. Then re-scan the carve: nearby
 key, seed, or encrypted hits are the actual prize.
 
 **Stop when:** wider carves (`-context`) keep showing markers only,

@@ -529,9 +529,13 @@ func runSalvage(path, outPath string, jsonOut bool) {
 		fmt.Printf(", partial")
 	}
 	if info.Ordered {
-		fmt.Printf(", ordered\n")
+		fmt.Printf(", ordered")
 	} else {
-		fmt.Printf(", unordered (page map only)\n")
+		fmt.Printf(", unordered (page map only)")
+	}
+	fmt.Printf(", %s\n", info.Verdict)
+	for _, reason := range info.Reasons {
+		fmt.Printf("  suspect: %s\n", reason)
 	}
 	for _, p := range info.Pages {
 		if info.Kind == "bdb" {

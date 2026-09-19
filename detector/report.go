@@ -38,17 +38,18 @@ type OffsetSpan struct {
 
 // Report is the full triage summary of a detection set.
 type Report struct {
-	Total         int                   `json:"total_detections"`
-	Unique        int                   `json:"unique_detections"`
-	Duplicates    int                   `json:"duplicates_merged"`
-	Counts        map[string]int        `json:"counts_by_type"`
-	EncryptedHits int                   `json:"encrypted_hits"`
-	CrackReady    int                   `json:"crack_ready_hashes"`
-	Salvaged      int                   `json:"salvaged"`
-	Targets       []string              `json:"targets"`
-	Spans         map[string]OffsetSpan `json:"spans_by_target"`
-	Hits          []ReportHit           `json:"hits"`
-	Playbook      []string              `json:"playbook"`
+	Total           int                   `json:"total_detections"`
+	Unique          int                   `json:"unique_detections"`
+	Duplicates      int                   `json:"duplicates_merged"`
+	Counts          map[string]int        `json:"counts_by_type"`
+	EncryptedHits   int                   `json:"encrypted_hits"`
+	CrackReady      int                   `json:"crack_ready_hashes"`
+	Salvaged        int                   `json:"salvaged"`
+	SalvagedSuspect int                   `json:"salvaged_suspect"`
+	Targets         []string              `json:"targets"`
+	Spans           map[string]OffsetSpan `json:"spans_by_target"`
+	Hits            []ReportHit           `json:"hits"`
+	Playbook        []string              `json:"playbook"`
 }
 
 type walletClass struct {
@@ -171,7 +172,7 @@ var playbookSteps = map[string]string{
 	"unknown":                 "Unclassified hits: inspect the offsets manually.",
 }
 
-func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged int) []string {
+func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged, salvagedSuspect int) []string {
 	if len(counts) == 0 {
 		return []string{"No wallet traces in this input — nothing to pursue."}
 	}
@@ -195,6 +196,9 @@ func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged int) [
 	}
 	if salvaged > 0 {
 		note := fmt.Sprintf("%d carves stitched into database images (see `salvage` in hits.jsonl) — try opening the .salvage.db files.", salvaged)
+		if salvagedSuspect > 0 {
+			note += fmt.Sprintf(" %d look suspect (partial or unordered — see `salvage.verdict`/`reasons`): treat those as leads, not databases.", salvagedSuspect)
+		}
 		steps = append(steps, note)
 	}
 	return steps
@@ -244,6 +248,11 @@ func Summarize(dets []Detection) Report {
 		rep.CrackReady += len(d.Hashes)
 		if d.Salvage != nil {
 			rep.Salvaged++
+			// Fail closed: anything but an explicit valid verdict
+			// (including verdict-less legacy sidecars) is suspect.
+			if d.Salvage.Verdict != SalvageValid {
+				rep.SalvagedSuspect++
+			}
 		}
 		targetSet[d.Target] = true
 		sp, ok := spans[d.Target]
@@ -274,7 +283,7 @@ func Summarize(dets []Detection) Report {
 	for t, sp := range spans {
 		rep.Spans[t] = *sp
 	}
-	rep.Playbook = buildPlaybook(rep.Counts, rep.EncryptedHits, rep.CrackReady, rep.Salvaged)
+	rep.Playbook = buildPlaybook(rep.Counts, rep.EncryptedHits, rep.CrackReady, rep.Salvaged, rep.SalvagedSuspect)
 	return rep
 }
 
@@ -321,7 +330,11 @@ func (r Report) Text() string {
 		fmt.Fprintf(&b, "Crack-ready hashes: %d (see `hashes` in hits.jsonl)\n", r.CrackReady)
 	}
 	if r.Salvaged > 0 {
-		fmt.Fprintf(&b, "Stitched databases: %d (see `salvage` in hits.jsonl)\n", r.Salvaged)
+		fmt.Fprintf(&b, "Stitched databases: %d (see `salvage` in hits.jsonl)", r.Salvaged)
+		if r.SalvagedSuspect > 0 {
+			fmt.Fprintf(&b, " [%d suspect]", r.SalvagedSuspect)
+		}
+		b.WriteString("\n")
 	}
 	for _, t := range r.Targets {
 		sp := r.Spans[t]

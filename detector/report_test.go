@@ -213,7 +213,7 @@ func TestSummarizeCountsCrackReady(t *testing.T) {
 
 func TestSummarizeCountsSalvaged(t *testing.T) {
 	d := reportFixtureDetection("bestblock", "/dev/sda", 10)
-	d.Salvage = &SalvageInfo{Kind: "bdb", PageSize: 4096, Complete: true, Ordered: true}
+	d.Salvage = &SalvageInfo{Kind: "bdb", PageSize: 4096, Complete: true, Ordered: true, Verdict: SalvageValid}
 	rep := Summarize([]Detection{d})
 	if rep.Salvaged != 1 {
 		t.Errorf("salvaged = %d, want 1", rep.Salvaged)
@@ -223,6 +223,27 @@ func TestSummarizeCountsSalvaged(t *testing.T) {
 	}
 	if !strings.Contains(rep.Text(), "Stitched databases: 1") {
 		t.Errorf("text lacks salvage line:\n%s", rep.Text())
+	}
+}
+
+func TestSummarizeCountsSuspectSalvage(t *testing.T) {
+	ok := reportFixtureDetection("bestblock", "/dev/sda", 10)
+	ok.Salvage = &SalvageInfo{Kind: "sqlite", Complete: true, Ordered: true, Verdict: SalvageValid}
+	bad := reportFixtureDetection("bestblock", "/dev/sda", 20)
+	bad.Salvage = &SalvageInfo{Kind: "bdb", Complete: false, Ordered: true,
+		Verdict: SalvageSuspect, Reasons: []string{"meta last_pgno 21, image holds 3 pages"}}
+	legacy := reportFixtureDetection("bestblock", "/dev/sda", 30)
+	legacy.Salvage = &SalvageInfo{Kind: "bdb", Complete: true, Ordered: true}
+	rep := Summarize([]Detection{ok, bad, legacy})
+	if rep.Salvaged != 3 || rep.SalvagedSuspect != 2 {
+		t.Errorf("salvaged = %d/%d suspect, want 3/2 (verdict-less fails closed)",
+			rep.Salvaged, rep.SalvagedSuspect)
+	}
+	if !strings.Contains(rep.Text(), "Stitched databases: 3") || !strings.Contains(rep.Text(), "[2 suspect]") {
+		t.Errorf("text lacks suspect split:\n%s", rep.Text())
+	}
+	if joined := strings.Join(rep.Playbook, "\n"); !strings.Contains(joined, "treat those as leads") {
+		t.Errorf("playbook lacks suspect guidance:\n%s", joined)
 	}
 }
 

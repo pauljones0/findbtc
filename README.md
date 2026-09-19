@@ -164,6 +164,16 @@ otherwise the page map is the deliverable. Pages destroyed by overwrite or
 SSD TRIM cannot be recovered by any tool; overflow and freelist pages are
 not identified.
 
+Every salvaged image carries a `verdict` in the sidecar (`salvage.verdict`,
+with `reasons`): `valid` means the structure predicts the file opens in
+the real database tool — try it (`db_verify`/your wallet software for
+BDB, `sqlite3 file.db "PRAGMA quick_check"` for SQLite). `suspect` means
+a concrete problem was found (missing pages, page-count mismatch,
+uncertain order) — treat the image as a lead for manual carving, not a
+database, and read `reasons` before spending effort. `-report` counts
+suspect salvages separately. Verdicts are structural predictions, checked
+against `db_verify` and `quick_check` on the fixture set — not proofs.
+
 ### Watch-only triage
 
 Extended public keys derive their addresses locally — no website paste,
