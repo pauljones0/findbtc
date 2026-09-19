@@ -552,11 +552,11 @@ audience doing secret hygiene on repos, laptops, and images gets
 nothing — while standing up a second scanner for the same bytes.
 
 **Completely solved when:**
-- [ ] A profile flag (e.g. `-profile=secrets`) adds non-wallet matchers
+- [x] A profile flag (e.g. `-profile=secrets`) adds non-wallet matchers
       (private-key blocks, credential shapes) under the same FP bar and
       carve/DFXML machinery; the default profile is byte-identical in
       behavior.
-- [ ] Each new matcher is silent on the 1 MB random + prose fixtures
+- [x] Each new matcher is silent on the 1 MB random + prose fixtures
       and finds its documented recall fixture.
 
 **Execute:**

@@ -60,8 +60,9 @@ type walletClass struct {
 // classifyNeedle maps a detection label to a wallet type and confidence.
 //
 // Confidence rationale: checksum- or structure-validated hits (keys, seed
-// phrases, keystores, descriptor markers, crypted_key/hdseed/keymeta) are
-// high — random data effectively never produces them. Distinctive but
+// phrases, keystores, descriptor markers, crypted_key/hdseed/keymeta,
+// secrets-profile PEM/token shapes) are high — random data effectively
+// never produces them. Distinctive but
 // unvalidated legacy keys are medium: they appear in documentation and
 // source (including this repo's own README), so prose can match. The bare
 // wallet.dat filename is low for the same reason, and unknown labels stay
@@ -116,6 +117,12 @@ func classifyNeedle(needle string) walletClass {
 		return walletClass{"lightning-lnd", "low", false}
 	case needle == "metamask-vault":
 		return walletClass{"metamask-vault", "high", true}
+	case needle == "pem-private-key":
+		return walletClass{"pem-private-key", "high", false}
+	case needle == "aws-access-key":
+		return walletClass{"aws-access-key", "high", false}
+	case needle == "github-token":
+		return walletClass{"github-token", "high", false}
 	default:
 		return walletClass{"unknown", "low", false}
 	}
@@ -136,6 +143,9 @@ var playbookOrder = []string{
 	"slip39-share",
 	"lightning-lnd",
 	"metamask-vault",
+	"pem-private-key",
+	"aws-access-key",
+	"github-token",
 	"wallet-filename",
 	"unknown",
 }
@@ -154,6 +164,9 @@ var playbookSteps = map[string]string{
 	"slip39-share":            "SLIP39 Shamir share: one share alone recovers nothing — gather the threshold number of shares, then combine them in a hardware wallet or compatible tool on an offline machine.",
 	"lightning-lnd":           "Lightning (lnd) traces: recover with channel.backup plus the seed via lnd's recovery flow on an offline machine; database fragments alone hold no funds without the seed.",
 	"metamask-vault":          "MetaMask vault (encrypted): it needs its password — run the offline vault decryptor once you have it.",
+	"pem-private-key":         "Private-key block: treat any carve as a live secret — move it to encrypted storage, rotate the key, and purge it from the repo or image it leaked from.",
+	"aws-access-key":          "AWS access key ID: revoke it in IAM unless you own it and it is still needed, then check CloudTrail for misuse between leak and revocation.",
+	"github-token":            "GitHub token: revoke it at github.com/settings/tokens, audit what it touched, and rotate anything it could reach.",
 	"wallet-filename":         "Only the wallet.dat name matched: a weak signal — look for nearby key hits before spending effort.",
 	"unknown":                 "Unclassified hits: inspect the offsets manually.",
 }

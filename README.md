@@ -67,6 +67,10 @@ releases, and `go.mod` floors the language version at 1.24.
 
     findbtc -extract-dir ./carve /dev/sda
 
+    # Eg. secret hygiene on a repo or laptop (adds non-wallet matchers):
+
+    findbtc -profile=secrets -walk ~/src > secrets.jsonl
+
 Detections print to stdout; logs, progress and the final `[COMPLETE]` line go
 to stderr, so `-json` output stays parseable. The line shape is a versioned
 contract: [schema/hits-v1.json](schema/hits-v1.json), documented in

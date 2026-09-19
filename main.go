@@ -45,7 +45,14 @@ func main() {
 	walkDepth := flag.Int("walk-maxdepth", 0, "Descend at most N levels below DIR during -walk (0 = unlimited)")
 	reveal := flag.Bool("reveal", false, "Print seed words for BIP39 hits (owner recovery only; NEVER share this output)")
 	caseLog := flag.String("case-log", "", "Append a JSON case-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)")
+	profile := flag.String("profile", "", "Detector set: empty (wallet matchers) or secrets (adds private-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)")
 	flag.Parse()
+	switch *profile {
+	case "", "default", "secrets":
+	default:
+		fmt.Fprintf(os.Stderr, "[main] Exiting due to error: unknown -profile %q (want \"\" or \"secrets\")\n", *profile)
+		os.Exit(1)
+	}
 	// An explicit -fs-offset pins the volume; otherwise -fs and
 	// -unallocated-only follow the partition table (Goal 12).
 	fsOffsetSet := false
@@ -93,7 +100,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *fsPath != "" {
-		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume)
+		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume, *profile)
 		return
 	}
 	if *walkPath != "" {
@@ -105,7 +112,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -s has no meaning for a file sweep")
 			os.Exit(1)
 		}
-		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog)
+		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile)
 		return
 	}
 	path := flag.Arg(0)
@@ -146,7 +153,7 @@ func main() {
 		}
 	}
 
-	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume}
+	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume, Profile: *profile}
 	printDetection := func(detection detector.Detection) {
 		if *jsonOut {
 			line, err := json.Marshal(detection)
@@ -223,8 +230,8 @@ func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opt
 // runFS implements filesystem-aware mode: inventory live and deleted
 // entries with names, then scan deleted entries' content with filenames
 // stamped on every hit.
-func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, checkpointPath string, resume bool) {
-	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], CheckpointPath: checkpointPath, Resume: resume}
+func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, checkpointPath string, resume bool, profile string) {
+	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], CheckpointPath: checkpointPath, Resume: resume, Profile: profile}
 	_, err := detector.ScanFSVolumes(path, fsOffset, autoSeed, opts, func(detection detector.Detection) {
 		if jsonOut {
 			line, err := json.Marshal(detection)
@@ -267,9 +274,9 @@ func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir st
 // runWalk implements directory-sweep mode: every regular file under root
 // gets the standard detectors, one unreadable file never aborts the
 // sweep, and each file appends its own case-log record.
-func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string) {
+func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, profile string) {
 	opts := detector.WalkOptions{
-		Scan:           detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:]},
+		Scan:           detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], Profile: profile},
 		MaxDepth:       maxdepth,
 		FollowSymlinks: follow,
 	}

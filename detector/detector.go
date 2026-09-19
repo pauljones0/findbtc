@@ -61,7 +61,7 @@ func trimEdgeFragments(data []byte, first, final bool, isWordChar func(byte) boo
 // including the widest seed phrase, keystore, and Goal 6 format spans.
 func scanOverlap() int {
 	max := bip39MaxSpan + 1
-	for _, span := range []int{keystoreMaxSpan, electrumMaxSpan, electrumFileMaxSpan, descriptorMaxSpan, slip39MaxSpan, metamaskMaxSpan} {
+	for _, span := range []int{keystoreMaxSpan, electrumMaxSpan, electrumFileMaxSpan, descriptorMaxSpan, slip39MaxSpan, metamaskMaxSpan, secretsMaxSpan} {
 		if span+1 > max {
 			max = span + 1
 		}
@@ -202,6 +202,11 @@ type Options struct {
 	// resume is handled by the caller (read the journal, pass the
 	// offset); this flag is ignored outside range scans.
 	Resume bool
+	// Profile selects the detector set: "" (or "default") runs the
+	// wallet matchers only; "secrets" adds the opt-in non-wallet
+	// secret matchers (private-key blocks, credential shapes) on
+	// top. Any other value fails the scan loudly.
+	Profile string
 	// rangeCtx carries range-journal state into runPipeline; set by
 	// ScanRangesWithOptions, never by callers.
 	rangeCtx *rangeJournalCtx
@@ -422,6 +427,16 @@ func firstRangeDiff(a, b []FSExtent) int {
 
 // runPipeline runs one scan target through the full detection pipeline.
 func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	// The profile gates the detector set for the whole pipeline; an
+	// unknown profile fails up front, never mid-scan.
+	var secrets bool
+	switch opts.Profile {
+	case "", "default":
+	case "secrets":
+		secrets = true
+	default:
+		return fmt.Errorf("unknown scan profile %q (want \"\" or \"secrets\")", opts.Profile)
+	}
 	// Shutdown is coordinated through ctx: when the final EOF reaches
 	// detectWallets it reports completion, Scan returns, and the deferred
 	// cancel below tells every pipeline stage to exit. Channels are never
@@ -482,7 +497,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 
 	// 3. And, finally, pass raw and uncompressed blocks both to wallet detection
 	go detectWallets(walletDetectionQueue, emptyBlocks, onDetection, onComplete,
-		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes, seqStart: opts.CarveSeqStart}, opts.Reveal)
+		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes, seqStart: opts.CarveSeqStart}, opts.Reveal, secrets)
 
 	// Publish the seed target to scan
 	scanTargets <- seed
@@ -750,7 +765,7 @@ var needles = [][]byte{
 // Scan blocks for traces of bitcoin wallets, the function will
 // wait in blocks on in until it sees EOF, and output scanned blocks
 // to out for reuse.
-func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig, reveal bool) {
+func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig, reveal bool, secrets bool) {
 	seq := carve.seqStart
 	for block := range in {
 		if block == EOF {
@@ -871,6 +886,32 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 					}
 				}
 				onDetection(d)
+			}
+		}
+		// Opt-in secret matchers share the same exactly-once rule and
+		// privacy discipline: labels and offsets only, never secret
+		// material. They run only under the secrets profile; the
+		// default profile never reaches this branch.
+		if secrets {
+			for _, m := range findSecrets(data, block.offset, block.overlap == 0, block.final) {
+				if m.endAbs > block.offset+int64(block.overlap) {
+					d := Detection{
+						Description: secretDescription(m.label, m.kind, block.location),
+						Needle:      m.label,
+						Offset:      m.startAbs,
+						Target:      block.source.Describe(),
+						BlockOffset: block.offset + int64(block.overlap),
+						MatchLen:    int(m.endAbs - m.startAbs),
+					}
+					if carve.dir != "" {
+						seq++
+						if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
+							fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+								m.label, d.Target, d.Offset, err.Error())
+						}
+					}
+					onDetection(d)
+				}
 			}
 		}
 		// Private and extended keys share the seed-phrase reporting rule and

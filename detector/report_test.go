@@ -60,6 +60,9 @@ func TestClassifyNeedle(t *testing.T) {
 		"channel.backup":     {"lightning-lnd", "low", false},
 		"channel.db":         {"lightning-lnd", "low", false},
 		"metamask-vault":     {"metamask-vault", "high", true},
+		"pem-private-key":    {"pem-private-key", "high", false},
+		"aws-access-key":     {"aws-access-key", "high", false},
+		"github-token":       {"github-token", "high", false},
 		"something-new":      {"unknown", "low", false},
 	}
 	for needle, want := range cases {
@@ -244,5 +247,23 @@ func TestSummarizeGoal6Playbook(t *testing.T) {
 	}
 	if rep.EncryptedHits != 1 {
 		t.Errorf("encrypted hits = %d, want 1 (the vault)", rep.EncryptedHits)
+	}
+}
+
+func TestSummarizeSecretsPlaybook(t *testing.T) {
+	dets := []Detection{
+		reportFixtureDetection("pem-private-key", "/repo/id_rsa", 10),
+		reportFixtureDetection("aws-access-key", "/repo/env", 20),
+		reportFixtureDetection("github-token", "/repo/env", 30),
+	}
+	rep := Summarize(dets)
+	joined := strings.Join(rep.Playbook, "\n")
+	for _, want := range []string{"Private-key block", "AWS access key", "GitHub token"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("playbook lacks %q:\n%s", want, joined)
+		}
+	}
+	if rep.EncryptedHits != 0 {
+		t.Errorf("encrypted hits = %d, want 0 (secrets are not wallets)", rep.EncryptedHits)
 	}
 }
