@@ -18,6 +18,25 @@ import (
 // version is stamped by GoReleaser; dev builds report "dev".
 var version = "dev"
 
+// Exit codes are a consumer contract (see README): 0 the run
+// completed (hits or not), 1 runtime error, 2 bad flags/usage, and
+// exitHitsFound only with -fail-on-hit when anything matched.
+const exitHitsFound = 3
+
+// gateOnHits trips the CI gate: with failOnHit set and n > 0 it says
+// so on stderr and exits exitHitsFound. Otherwise it returns quietly.
+func gateOnHits(tag string, n int, failOnHit bool) {
+	if !failOnHit || n <= 0 {
+		return
+	}
+	hitWord := "detections"
+	if n == 1 {
+		hitWord = "detection"
+	}
+	fmt.Fprintf(os.Stderr, "[%s] %d %s found (-fail-on-hit): exiting %d\n", tag, n, hitWord, exitHitsFound)
+	os.Exit(exitHitsFound)
+}
+
 func main() {
 	showVersion := flag.Bool("version", false, "Print version and exit")
 	startOffset := flag.Int64("s", 0, "Start at byte offset")
@@ -46,6 +65,7 @@ func main() {
 	reveal := flag.Bool("reveal", false, "Print seed words for BIP39 hits (owner recovery only; NEVER share this output)")
 	caseLog := flag.String("case-log", "", "Append a JSON case-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)")
 	profile := flag.String("profile", "", "Detector set: empty (wallet matchers) or secrets (adds private-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)")
+	failOnHit := flag.Bool("fail-on-hit", false, "Exit 3 when the scan or report finds anything (for CI gates and pre-commit hooks); without it, finding hits still exits 0")
 	flag.Parse()
 	switch *profile {
 	case "", "default", "secrets":
@@ -69,7 +89,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "WARNING: --reveal prints seed words to stdout. Owner recovery only: keep this output secret, never share or paste it anywhere.")
 	}
 	if *reportPath != "" {
-		runReport(*reportPath, *jsonOut)
+		runReport(*reportPath, *jsonOut, *failOnHit)
 		return
 	}
 	if *dfxmlPath != "" {
@@ -100,7 +120,7 @@ func main() {
 		os.Exit(1)
 	}
 	if *fsPath != "" {
-		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume, *profile)
+		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume, *profile, *failOnHit)
 		return
 	}
 	if *walkPath != "" {
@@ -112,13 +132,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -s has no meaning for a file sweep")
 			os.Exit(1)
 		}
-		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile)
+		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile, *failOnHit)
 		return
 	}
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -154,7 +174,9 @@ func main() {
 	}
 
 	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume, Profile: *profile}
+	var hits int
 	printDetection := func(detection detector.Detection) {
+		hits++
 		if *jsonOut {
 			line, err := json.Marshal(detection)
 			if err != nil {
@@ -194,10 +216,11 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "[COMPLETE]")
+	gateOnHits("main", hits, *failOnHit)
 }
 
 // runUnallocated implements --unallocated-only: scan just the free space
-// of the NTFS/ext volume at fsOffset, or of every NTFS/ext volume on the
+// of the volume at fsOffset, or of every supported volume on the
 // disk when autoSeed follows the partition table. The merged range list
 // journals (range_index, offset); resume validates the list still matches.
 func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opts detector.Options, onDetection func(detector.Detection)) error {
@@ -230,9 +253,11 @@ func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opt
 // runFS implements filesystem-aware mode: inventory live and deleted
 // entries with names, then scan deleted entries' content with filenames
 // stamped on every hit.
-func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, checkpointPath string, resume bool, profile string) {
+func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, checkpointPath string, resume bool, profile string, failOnHit bool) {
 	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], CheckpointPath: checkpointPath, Resume: resume, Profile: profile}
+	var hits int
 	_, err := detector.ScanFSVolumes(path, fsOffset, autoSeed, opts, func(detection detector.Detection) {
+		hits++
 		if jsonOut {
 			line, err := json.Marshal(detection)
 			if err != nil {
@@ -269,12 +294,13 @@ func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir st
 		os.Exit(1)
 	}
 	fmt.Fprintln(os.Stderr, "[COMPLETE]")
+	gateOnHits("fs", hits, failOnHit)
 }
 
 // runWalk implements directory-sweep mode: every regular file under root
 // gets the standard detectors, one unreadable file never aborts the
 // sweep, and each file appends its own case-log record.
-func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, profile string) {
+func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, profile string, failOnHit bool) {
 	opts := detector.WalkOptions{
 		Scan:           detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], Profile: profile},
 		MaxDepth:       maxdepth,
@@ -315,10 +341,11 @@ func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir stri
 			stats.FailedTotal-int64(len(stats.Failed)))
 	}
 	fmt.Fprintln(os.Stderr, "[COMPLETE]")
+	gateOnHits("walk", int(stats.Detections), failOnHit)
 }
 
 // runReport implements triage mode: summarize saved -json hits offline.
-func runReport(path string, jsonOut bool) {
+func runReport(path string, jsonOut bool, failOnHit bool) {
 	f := os.Stdin
 	if path != "-" {
 		var err error
@@ -342,9 +369,10 @@ func runReport(path string, jsonOut bool) {
 			os.Exit(1)
 		}
 		fmt.Println(string(raw))
-		return
+	} else {
+		fmt.Print(rep.Text())
 	}
-	fmt.Print(rep.Text())
+	gateOnHits("report", rep.Unique, failOnHit)
 }
 
 // runDFXML implements DFXML-export mode: convert saved -json hits to a

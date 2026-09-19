@@ -1,0 +1,36 @@
+#!/bin/sh
+# Sample pre-commit hook: fail the commit when findbtc finds secrets.
+#
+# Install: cp samples/pre-commit .git/hooks/pre-commit
+# Override the binary: FINDBTC=/path/to/findbtc git commit ...
+#
+# Sweeps the whole worktree with the secrets profile. For large repos
+# this is slow on every commit — sweep in CI instead (see
+# samples/secrets-gate.yml) and keep the hook for small repos.
+set -u
+
+FINDBTC="${FINDBTC:-findbtc}"
+
+TOP="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "pre-commit(findbtc): not a git repo" >&2
+  exit 1
+}
+
+OUT="$(mktemp)" || exit 1
+# No `if` here: capture the status directly. (`if cmd; then...; fi`
+# with no else exits 0 when cmd fails, which would swallow the gate.)
+"$FINDBTC" -walk "$TOP" -profile=secrets -fail-on-hit -json > "$OUT" 2>/dev/null
+status=$?
+if [ "$status" -eq 0 ]; then
+  rm -f "$OUT"
+  exit 0
+fi
+if [ "$status" -eq 3 ]; then
+  echo "pre-commit(findbtc): secrets found — not committing:" >&2
+  cat "$OUT" >&2
+  echo "Remove the secrets and retry; the findbtc secrets-profile docs have the rotate/revoke checklist." >&2
+else
+  echo "pre-commit(findbtc): scanner failed (exit $status); rerun it by hand to see why" >&2
+fi
+rm -f "$OUT"
+exit "$status"

@@ -41,9 +41,9 @@ completely solve the pain point?"**
 | 20 | Opt-in secret profiles | complete | cbf95d4 |
 | 21 | Container image | complete | 97ef967 |
 | 22 | Pipeline ingest evaluation | complete | 2525e43 |
-| 23 | Owner "what's next" guide + anti-scam shield | complete | - |
-| 24 | Exit-on-hit + CI gating | active | - |
-| 25 | FAT/exFAT filesystem support | queued | - |
+| 23 | Owner "what's next" guide + anti-scam shield | complete | 4bed9b8 |
+| 24 | Exit-on-hit + CI gating | complete | - |
+| 25 | FAT/exFAT filesystem support | active | - |
 | 26 | Salvage validation | queued | - |
 | 27 | Guided mode (-advise) | queued | - |
 | 28 | Embedding pass (quiet + cancel) | queued | - |

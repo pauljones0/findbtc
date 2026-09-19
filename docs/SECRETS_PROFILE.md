@@ -37,6 +37,24 @@ constants) and meets the same bar as the wallet detectors
 bytes and on the project's own prose (LICENSE, README, GOALS,
 main.go).
 
+## Gating CI and commits
+
+`-fail-on-hit` exits 3 when a scan, `-walk`, or `-report` finds
+anything (without it, finding hits still exits 0). Two samples ship
+in `samples/`:
+
+- Pre-commit hook: `cp samples/pre-commit .git/hooks/pre-commit`.
+  Fails the commit on secrets; override the binary with
+  `FINDBTC=/path/to/findbtc`. It sweeps the whole worktree, so for
+  large repos prefer the CI gate below.
+- GitHub workflow: copy `samples/secrets-gate.yml` to
+  `.github/workflows/`. It runs the same sweep from the blessed
+  container image.
+
+Both run `-walk -profile=secrets -fail-on-hit`, so local and CI
+gates agree by construction. (Repeat sweeps re-report accepted
+findings until baselines land — see GOALS.md Goal 29.)
+
 ## Responding to hits
 
 1. Treat any carve as a live secret: move it to encrypted storage,

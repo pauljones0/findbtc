@@ -78,7 +78,11 @@ releases, and `go.mod` floors the language version at 1.24.
     findbtc -profile=secrets -walk ~/src > secrets.jsonl
 
 Detections print to stdout; logs, progress and the final `[COMPLETE]` line go
-to stderr, so `-json` output stays parseable. The line shape is a versioned
+to stderr, so `-json` output stays parseable. Exit codes are a contract:
+0 the run completed (hits or not), 1 runtime error, 2 bad flags/usage,
+3 hits found — but only with `-fail-on-hit`, which gates CI and
+pre-commit hooks (see [docs/SECRETS_PROFILE.md](docs/SECRETS_PROFILE.md)).
+The line shape is a versioned
 contract: [schema/hits-v1.json](schema/hits-v1.json), documented in
 [docs/HITS_SCHEMA.md](docs/HITS_SCHEMA.md). Each carved hit lands in
 `hit-NNNNNN.bin` with a `hit-NNNNNN.json` sidecar holding the same detection
@@ -214,7 +218,7 @@ scans deleted files' content with filenames stamped on every hit, while
     findbtc -unallocated-only /dev/sdb1
 
 For full-disk captures, omit `-fs-offset` and the MBR/GPT partition
-table is followed automatically (every NTFS/ext partition is scanned);
+table is followed automatically (every NTFS/ext/FAT/exFAT partition is scanned);
 pass `-fs-offset` only to pin one volume boot sector by hand.
 Range scans take `-checkpoint`/`-resume` too: the journal records
 `(range_index, offset)`, and resume refuses loudly if the volume's
