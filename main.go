@@ -48,6 +48,7 @@ func main() {
 	reportPath := flag.String("report", "", "Summarize a -json hits file (or - for stdin) instead of scanning")
 	dfxmlPath := flag.String("dfxml", "", "Convert a -json hits file (or - for stdin) to DFXML on stdout instead of scanning")
 	verifyLogPath := flag.String("verify-case-log", "", "Re-hash the sources behind each record in case-log FILE and report match/mismatch instead of scanning")
+	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)")
 	hashesPath := flag.String("hashes", "", "Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning")
 	salvagePath := flag.String("salvage", "", "Analyze FILE for salvageable database pages instead of scanning")
 	salvageOut := flag.String("salvage-out", "", "Write the salvaged database image to PATH (only with -salvage)")
@@ -96,6 +97,10 @@ func main() {
 		runDFXML(*dfxmlPath)
 		return
 	}
+	if *advisePath != "" {
+		runAdvise(*advisePath)
+		return
+	}
 	if *verifyLogPath != "" {
 		if err := detector.VerifyCaseLog(*verifyLogPath, os.Stdout); err != nil {
 			fmt.Fprintf(os.Stderr, "[verify] Exiting due to error: %s\n", err.Error())
@@ -138,7 +143,7 @@ func main() {
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -345,6 +350,29 @@ func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir stri
 }
 
 // runReport implements triage mode: summarize saved -json hits offline.
+func runAdvise(path string) {
+	ad, err := detector.Advise(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[advise] Exiting due to error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	fmt.Printf("Target: %s\n", ad.Target)
+	if ad.Command == "" {
+		for _, r := range ad.Reasons {
+			fmt.Printf("  %s\n", r)
+		}
+		return
+	}
+	fmt.Printf("Recommended: %s\n", ad.Command)
+	fmt.Printf("Why:\n")
+	for _, r := range ad.Reasons {
+		fmt.Printf("  - %s\n", r)
+	}
+	for _, a := range ad.Also {
+		fmt.Printf("Also consider: %s\n", a)
+	}
+}
+
 func runReport(path string, jsonOut bool, failOnHit bool) {
 	f := os.Stdin
 	if path != "-" {

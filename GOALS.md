@@ -44,8 +44,8 @@ completely solve the pain point?"**
 | 23 | Owner "what's next" guide + anti-scam shield | complete | 4bed9b8 |
 | 24 | Exit-on-hit + CI gating | complete | 0bb1793 |
 | 25 | FAT/exFAT filesystem support | complete | 61abf5b |
-| 26 | Salvage validation | complete | - |
-| 27 | Guided mode (-advise) | queued | - |
+| 26 | Salvage validation | complete | e13d569 |
+| 27 | Guided mode (-advise) | complete | - |
 | 28 | Embedding pass (quiet + cancel) | queued | - |
 | 29 | Baseline/allowlist for repeat sweeps | queued | - |
 | 30 | Offline secret verification | queued | - |
@@ -746,10 +746,10 @@ is a real decision tree, and each mode fails well only after the
 user guessed wrong.
 
 **Completely solved when:**
-- [ ] `-advise TARGET` inspects the target (partitioned? filesystem?
+- [x] `-advise TARGET` inspects the target (partitioned? filesystem?
       directory? size?) and prints the recommended command with
       reasons. It never scans and never auto-runs — pure routing.
-- [ ] Four fixtures (raw file, partitioned disk, ext image,
+- [x] Four fixtures (raw file, partitioned disk, ext image,
       directory) route to the documented-best command, proven by
       test.
 

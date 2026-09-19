@@ -77,6 +77,11 @@ releases, and `go.mod` floors the language version at 1.24.
 
     findbtc -profile=secrets -walk ~/src > secrets.jsonl
 
+Not sure which mode fits your target? Ask first — it only inspects,
+never scans:
+
+    findbtc -advise /dev/sda
+
 Detections print to stdout; logs, progress and the final `[COMPLETE]` line go
 to stderr, so `-json` output stays parseable. Exit codes are a contract:
 0 the run completed (hits or not), 1 runtime error, 2 bad flags/usage,
