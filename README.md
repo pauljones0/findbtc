@@ -63,7 +63,9 @@ releases, and `go.mod` floors the language version at 1.24.
     findbtc -extract-dir ./carve /dev/sda
 
 Detections print to stdout; logs, progress and the final `[COMPLETE]` line go
-to stderr, so `-json` output stays parseable. Each carved hit lands in
+to stderr, so `-json` output stays parseable. The line shape is a versioned
+contract: [schema/hits-v1.json](schema/hits-v1.json), documented in
+[docs/HITS_SCHEMA.md](docs/HITS_SCHEMA.md). Each carved hit lands in
 `hit-NNNNNN.bin` with a `hit-NNNNNN.json` sidecar holding the same detection
 plus a classification of the carved bytes (`sqlite`, `bdb`, `gzip`, `zip`,
 `text`, `high-entropy`, ...).

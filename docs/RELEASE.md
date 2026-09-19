@@ -29,7 +29,7 @@ Each platform archive (`findbtc_<version>_<os>_<arch>.tar.gz`,
    support) against the archive you will run:
 
        gh attestation verify findbtc_*_linux_amd64.tar.gz \
-         --repo github.com/pauljones0/findbtc
+         -R pauljones0/findbtc
 
    A passing report binds the archive to the exact repository commit
    and workflow run that produced the release. Repeat for the

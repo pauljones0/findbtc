@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pauljones0/findbtc/blob/master/schema/hits-v1.json",
+  "title": "findbtc hits.jsonl line (v1)",
+  "description": "One JSONL line of `findbtc -json` output: a single Detection. The same schema covers the raw, filesystem-guided (-fs), and owner-reveal (--reveal) variants; variant-only fields are optional and documented per property. Within v1 only additive, backwards-compatible changes are allowed (new optional properties, new enum values); any removal, rename, or type change requires a new schema version. See docs/HITS_SCHEMA.md.",
+  "type": "object",
+  "required": ["description", "needle", "offset", "target", "block_offset", "match_length"],
+  "additionalProperties": false,
+  "properties": {
+    "description": {
+      "type": "string",
+      "description": "Human-readable label for the matched trace."
+    },
+    "needle": {
+      "type": "string",
+      "description": "Machine-readable detector label (e.g. crypted_key, wif, bip39-12, eth-keystore)."
+    },
+    "offset": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Absolute byte offset of the needle within target."
+    },
+    "target": {
+      "type": "string",
+      "description": "Scanned stream holding the hit (device path, image path, or archive member path)."
+    },
+    "block_offset": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Logical 4kB-block start containing the hit."
+    },
+    "match_length": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Byte span of the hit (needle length or phrase span)."
+    },
+    "carve_path": {
+      "type": "string",
+      "description": "Carved file for this hit; present only when carving is enabled (-extract-dir)."
+    },
+    "carve": {
+      "$ref": "#/$defs/carveInfo",
+      "description": "Classification of the carved bytes; present only when carving succeeded."
+    },
+    "hashes": {
+      "type": "array",
+      "description": "Crack-ready password material extracted from the carve; present only when carving found usable mkey or keystore records.",
+      "items": { "$ref": "#/$defs/crackHash" }
+    },
+    "words": {
+      "type": "array",
+      "description": "Seed-phrase words for BIP39 hits; present only with owner opt-in (--reveal). Never present otherwise.",
+      "items": { "type": "string" }
+    },
+    "file_name": {
+      "type": "string",
+      "description": "Filesystem entry holding the hit; present only for filesystem-guided (-fs) scans, never for raw scans."
+    },
+    "salvage": {
+      "$ref": "#/$defs/salvageInfo",
+      "description": "Reassembled database pages from the carve; present only when salvage wrote a .salvage.db file."
+    }
+  },
+  "$defs": {
+    "carveInfo": {
+      "type": "object",
+      "required": ["class", "size", "entropy_bits"],
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "type": "string",
+          "description": "Carve classifier label (sqlite, bdb, bbolt, gzip, zip, text, high-entropy, ...). Open set: new classes may appear within v1."
+        },
+        "magic_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Carve-file offset of the identifying magic, if any."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Carved byte count."
+        },
+        "entropy_bits": {
+          "type": "number",
+          "description": "Shannon entropy of the carved bytes, in bits per byte."
+        }
+      }
+    },
+    "crackHash": {
+      "type": "object",
+      "required": ["format", "kdf", "offset"],
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["bitcoin-core-mkey", "ethereum-keystore"],
+          "description": "Cracker input format."
+        },
+        "hash": {
+          "type": "string",
+          "description": "Cracker input string ($bitcoin$...); empty when only structured params are available."
+        },
+        "kdf": {
+          "type": "string",
+          "description": "Key derivation name (pbkdf2-hmac-sha512, scrypt, ...)."
+        },
+        "iterations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "KDF iteration count, when applicable."
+        },
+        "salt_hex": {
+          "type": "string",
+          "description": "KDF salt as hex, when applicable."
+        },
+        "method": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bitcoin Core mkey derivation method, when applicable."
+        },
+        "params": {
+          "type": "object",
+          "description": "Fuller KDF parameter set (keystores).",
+          "additionalProperties": { "type": "string" }
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Absolute offset of the source record in the scanned bytes."
+        }
+      }
+    },
+    "salvageInfo": {
+      "type": "object",
+      "required": ["kind", "page_size", "pages", "runs", "complete", "ordered"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Salvage output path; empty for analysis-only results."
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["bdb", "sqlite"],
+          "description": "Reassembled database kind."
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/salvagePage" }
+        },
+        "runs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/salvageRun" }
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "True when every page is present."
+        },
+        "ordered": {
+          "type": "boolean",
+          "description": "True when the image is in file order."
+        }
+      }
+    },
+    "salvagePage": {
+      "type": "object",
+      "required": ["offset", "size", "kind"],
+      "additionalProperties": false,
+      "properties": {
+        "pgno": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Page number (BDB only; SQLite pages lack numbers)."
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Absolute source offset of the page."
+        },
+        "size": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["bdb-meta", "bdb-page", "sqlite-master", "sqlite-btree"]
+        }
+      }
+    },
+    "salvageRun": {
+      "type": "object",
+      "required": ["start_offset", "pages"],
+      "additionalProperties": false,
+      "properties": {
+        "start_offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pages": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  }
+}

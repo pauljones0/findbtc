@@ -335,11 +335,11 @@ no schema document exists — integrators guess field shapes, and a
 `Detection` struct change can silently break them.
 
 **Completely solved when:**
-- [ ] A versioned JSON Schema for `hits.jsonl` is published in-repo.
-- [ ] A committed test generates sample hits from existing tests and
+- [x] A versioned JSON Schema for `hits.jsonl` is published in-repo.
+- [x] A committed test generates sample hits from existing tests and
       validates them against the schema; a mutated field fails
       (negative control).
-- [ ] One schema covers raw/fs/reveal variants, or the variants are
+- [x] One schema covers raw/fs/reveal variants, or the variants are
       documented with per-variant schemas.
 
 **Execute:**
