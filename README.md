@@ -109,7 +109,9 @@ typo candidates within edit distance 2, and how many of those validate
 the checksum. Overlapping evidence resolves exact first, then unordered
 runs, then near-miss windows, so one location never reports twice.
 Measured false-positive bar: zero hits on 1MB of random
-bytes and on this repo's own prose (LICENSE/README/GOALS/main.go).
+bytes and on needle-free prose (LICENSE, main.go, fixtures).
+README and GOALS name needle labels on purpose, so the repo
+self-scan expects hits there and on fixtures.
 
 Owner recovery can print the actual words with `--reveal`, which attaches
 them to BIP39 detections (stdout `-json` included) after a loud warning.
@@ -200,6 +202,17 @@ Unreadable sectors are retried, then skipped and logged with their byte
 ranges, so one bad spot never aborts a scan. For long scans, `-checkpoint
 FILE` journals progress every 1MB; if the run is interrupted, `-resume`
 continues from the journal instead of starting over.
+
+### Directory sweeps
+
+Sweep a live system, laptop, or repo with the same detectors:
+
+    findbtc -walk /home/user -json > sweep.jsonl
+    findbtc -report sweep.jsonl
+
+Symlinks are not followed by default, one unreadable file never aborts
+the sweep, and each file appends its own case-log record. See the
+[runbook](docs/LIVE_SWEEP.md) for policy and live-system notes.
 
 ### Forensic casework
 

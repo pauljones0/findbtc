@@ -198,6 +198,10 @@ type Options struct {
 	// the file: source identity, streaming SHA-256/MD5 over the bytes
 	// actually read, skipped ranges, and the detection count.
 	CaseLogPath string
+	// CarveSeqStart is the first carve sequence number (hit-NNNNNN).
+	// Multi-target callers (the directory walker) thread a shared
+	// counter through it so carves never collide; single scans leave 0.
+	CarveSeqStart int
 	// ToolVersion stamps the case log; main sets it from the build.
 	ToolVersion string
 	// Flags records the invocation arguments in the case log; main sets
@@ -333,7 +337,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 
 	// 3. And, finally, pass raw and uncompressed blocks both to wallet detection
 	go detectWallets(walletDetectionQueue, emptyBlocks, onDetection, onComplete,
-		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes}, opts.Reveal)
+		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes, seqStart: opts.CarveSeqStart}, opts.Reveal)
 
 	// Publish the seed target to scan
 	scanTargets <- seed
@@ -602,7 +606,7 @@ var needles = [][]byte{
 // wait in blocks on in until it sees EOF, and output scanned blocks
 // to out for reuse.
 func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig, reveal bool) {
-	seq := 0
+	seq := carve.seqStart
 	for block := range in {
 		if block == EOF {
 			onComplete()

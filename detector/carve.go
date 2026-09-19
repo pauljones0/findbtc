@@ -40,6 +40,7 @@ var carveMagics = []struct {
 type carveConfig struct {
 	dir          string
 	contextBytes int64
+	seqStart     int
 }
 
 // carveDetection writes the bytes surrounding a hit to dir as hit-NNNNNN.bin

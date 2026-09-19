@@ -385,12 +385,12 @@ secrets with the existing detectors, which is the largest adjacent
 audience for this tool.
 
 **Completely solved when:**
-- [ ] A walk mode scans directory trees reusing per-file targets, with
+- [x] A walk mode scans directory trees reusing per-file targets, with
       an explicit symlink/permission policy (no symlink follow by
       default).
-- [ ] Per-file isolation: one unreadable file never aborts the walk;
+- [x] Per-file isolation: one unreadable file never aborts the walk;
       per-file case-log records (JSONL already appends).
-- [ ] Self-scan over this repo finds the documented fixture needles and
+- [x] Self-scan over this repo finds the documented fixture needles and
       stays silent on prose; symlink-loop + unreadable-file fixtures
       pass.
 
