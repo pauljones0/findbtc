@@ -38,11 +38,19 @@ func main() {
 	watchCount := flag.Int("watch-count", detector.WatchDefaultCount, "Addresses to derive per chain, external and change (only with -watch)")
 	balanceEndpoint := flag.String("balance-endpoint", "", "Opt-in: query ADDRESS balances from this Esplora-compatible base URL (only with -watch; leaks addresses to that server)")
 	fsPath := flag.String("fs", "", "Filesystem-aware mode: recover deleted entries with names from the NTFS/ext volume in FILE and scan their content")
-	fsOffset := flag.Int64("fs-offset", 0, "Byte offset of the volume boot sector inside FILE (only with -fs and -unallocated-only)")
+	fsOffset := flag.Int64("fs-offset", 0, "Byte offset of the volume boot sector inside FILE (only with -fs and -unallocated-only); when omitted, the partition table is followed automatically")
 	unallocatedOnly := flag.Bool("unallocated-only", false, "Scan only unallocated filesystem space (NTFS/ext at -fs-offset); skips live data")
 	reveal := flag.Bool("reveal", false, "Print seed words for BIP39 hits (owner recovery only; NEVER share this output)")
 	caseLog := flag.String("case-log", "", "Append a JSON case-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)")
 	flag.Parse()
+	// An explicit -fs-offset pins the volume; otherwise -fs and
+	// -unallocated-only follow the partition table (Goal 12).
+	fsOffsetSet := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "fs-offset" {
+			fsOffsetSet = true
+		}
+	})
 	if *showVersion {
 		fmt.Printf("findbtc %s\n", version)
 		return
@@ -86,7 +94,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -checkpoint and -resume are not supported with -fs")
 			os.Exit(1)
 		}
-		runFS(*fsPath, *fsOffset, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog)
+		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog)
 		return
 	}
 	path := flag.Arg(0)
@@ -151,7 +159,7 @@ func main() {
 	}
 	var err error
 	if *unallocatedOnly {
-		err = runUnallocated(path, *fsOffset, start, opts, printDetection)
+		err = runUnallocated(path, *fsOffset, !fsOffsetSet, start, opts, printDetection)
 	} else {
 		err = detector.ScanWithOptions(start, path, opts, printDetection, newProgressReporter().onProgress)
 	}
@@ -165,13 +173,14 @@ func main() {
 }
 
 // runUnallocated implements --unallocated-only: scan just the free space
-// of the NTFS/ext volume at fsOffset. Checkpointing is refused: a single
-// offset cannot resume a range list.
-func runUnallocated(path string, fsOffset, start int64, opts detector.Options, onDetection func(detector.Detection)) error {
+// of the NTFS/ext volume at fsOffset, or of every NTFS/ext volume on the
+// disk when autoSeed follows the partition table. Checkpointing is
+// refused: a single offset cannot resume a range list.
+func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opts detector.Options, onDetection func(detector.Detection)) error {
 	if opts.CheckpointPath != "" {
 		return fmt.Errorf("-checkpoint and -resume are not supported with -unallocated-only")
 	}
-	kind, free, err := detector.UnallocatedRanges(path, fsOffset)
+	kinds, free, err := detector.UnallocatedRangesAuto(path, fsOffset, autoSeed)
 	if err != nil {
 		return err
 	}
@@ -192,17 +201,17 @@ func runUnallocated(path string, fsOffset, start int64, opts detector.Options, o
 		fmt.Fprintln(os.Stderr, "[main] No unallocated space to scan.")
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "[main] Scanning %d unallocated ranges (%d bytes) of %s volume %s.\n",
-		len(ranges), total, kind, path)
+	fmt.Fprintf(os.Stderr, "[main] Scanning %d unallocated ranges (%d bytes) of %s volume(s) %s.\n",
+		len(ranges), total, strings.Join(kinds, "+"), path)
 	return detector.ScanRangesWithOptions(path, ranges, opts, onDetection, newProgressReporter().onProgress)
 }
 
 // runFS implements filesystem-aware mode: inventory live and deleted
 // entries with names, then scan deleted entries' content with filenames
 // stamped on every hit.
-func runFS(path string, fsOffset int64, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string) {
+func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string) {
 	opts := detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:]}
-	_, err := detector.ScanFS(path, fsOffset, opts, func(detection detector.Detection) {
+	_, err := detector.ScanFSVolumes(path, fsOffset, autoSeed, opts, func(detection detector.Detection) {
 		if jsonOut {
 			line, err := json.Marshal(detection)
 			if err != nil {

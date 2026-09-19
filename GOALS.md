@@ -360,10 +360,10 @@ followed", so the filesystem layer is unreachable without external
 sleuthing on exactly the images that need it most.
 
 **Completely solved when:**
-- [ ] A partition-table parser covering the common PC schemes locates
+- [x] A partition-table parser covering the common PC schemes locates
       NTFS/ext partitions and auto-seeds `-fs` ranges; no manual offset
       needed for the standard layouts.
-- [ ] Unknown/hybrid layouts error loudly with the volume identified,
+- [x] Unknown/hybrid layouts error loudly with the volume identified,
       never silently scan the wrong bytes.
 
 **Execute:**

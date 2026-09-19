@@ -17,9 +17,16 @@ Scan only free space (deleted content, no filenames):
 
     findbtc -unallocated-only /dev/sdb1 [-json]
 
-`-fs-offset` points at the volume boot sector when the image starts
-earlier (full-disk captures, concatenated evidences). Partition tables
-are not followed: point at the volume (e.g. `/dev/sdb1`), not the disk.
+`-fs-offset` pins one volume boot sector by hand (concatenated
+evidences, hand-verified layouts). When it is omitted, MBR and GPT
+partition tables are followed automatically: every partition that opens
+as NTFS/ext is scanned, so a full-disk capture needs no manual offset.
+Hybrid MBR+GPT layouts, corrupt tables, and disks with no NTFS/ext
+partition error loudly with the layout described instead of scanning
+the wrong bytes; `-unallocated-only` seeds from the same partitions.
+Sector size is assumed 512 bytes. Regenerate the sfdisk cross-check
+fixtures with `scripts/part-oracle.sh` and replay them via
+`FBT_PART_ORACLE_DIR=DIR go test ./detector/ -run TestPartitionOracleCrossCheck`.
 
 `-report` shows `file=` for hits that carry a filename.
 
