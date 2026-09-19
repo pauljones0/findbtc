@@ -578,7 +578,7 @@ images have no blessed findbtc image — they roll their own Dockerfiles
 with unknown provenance instead of a digest-pinned, attested one.
 
 **Completely solved when:**
-- [ ] One supported container path is evaluated, built, and documented
+- [x] One supported container path is evaluated, built, and documented
       (GoReleaser-supported path or minimal Dockerfile + registry
       workflow); digest-pinned pull + volume-mount scan works per docs.
 

@@ -39,6 +39,12 @@ On Linux, prefer the managed packages over the archives:
     sudo apt install ./findbtc_*_linux_amd64.deb   # Debian/Ubuntu
     sudo dnf install ./findbtc_*_linux_amd64.rpm   # Fedora/RHEL
 
+Container-first labs can run the blessed image instead (digest-pinned
+pull + volume-mount scan, see [docs/CONTAINER.md](docs/CONTAINER.md)):
+
+    docker run --rm -v ./evidence:/evidence:ro \
+      ghcr.io/pauljones0/findbtc:latest /evidence/disk.img
+
 There is no Homebrew tap yet, so macOS users should install from the release
 archives.
 

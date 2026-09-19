@@ -16,6 +16,8 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
+    env:
+      - CGO_ENABLED=0
   - id: findbtc-linux
     main: .
     binary: findbtc
@@ -26,6 +28,11 @@ builds:
       - arm64
     ldflags:
       - -s -w -X main.version={{ .Version }}
+    env:
+      # Static binaries: archives run anywhere and the scratch-based
+      # container image has no dynamic loader. The module is pure Go
+      # (stdlib + x/sys), so nothing needs cgo.
+      - CGO_ENABLED=0
 
 archives:
   - id: default
@@ -64,6 +71,31 @@ nfpms:
         dst: /usr/share/doc/findbtc/LICENSE
       - src: README.md
         dst: /usr/share/doc/findbtc/README.md
+
+# Blessed container image: scratch + the exact release binaries for
+# linux/amd64 and linux/arm64, pushed to GHCR on tag. Snapshot builds
+# produce per-platform local images (tag-arch suffix) instead of a
+# pushed manifest; see docs/CONTAINER.md.
+dockers_v2:
+  - ids:
+      - findbtc-linux
+    images:
+      - ghcr.io/pauljones0/findbtc
+    tags:
+      - "{{.Version}}"
+      - latest
+    extra_files:
+      - LICENSE
+      - README.md
+    labels:
+      org.opencontainers.image.title: findbtc
+      org.opencontainers.image.description: Find BTC wallets by scanning raw block devices
+      org.opencontainers.image.source: https://github.com/pauljones0/findbtc
+      org.opencontainers.image.licenses: GPL-3.0-or-later
+    annotations:
+      org.opencontainers.image.revision: "{{.FullCommit}}"
+      org.opencontainers.image.version: "{{.Version}}"
+      org.opencontainers.image.created: "{{.Date}}"
 
 # The cask file is generated into dist/ but not pushed: the tap repo does
 # not exist yet. Create an empty public repo named homebrew-findbtc under
