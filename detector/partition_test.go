@@ -293,6 +293,72 @@ func TestScanFSVolumesAutoSeed(t *testing.T) {
 	}
 }
 
+// composeFATDisk builds the Goal 25 fixture: a partitioned disk with
+// the synthetic FAT32 volume at 1MiB and the synthetic exFAT volume at
+// 34MiB (past the 32.5MiB FAT32 image).
+func composeFATDisk(t *testing.T, scheme string) (string, []int64) {
+	t.Helper()
+	fatImg, err := os.ReadFile(buildTestFAT32(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exImg, err := os.ReadFile(buildTestExFAT(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mb = 1024 * 1024
+	disk := make([]byte, 36*mb)
+	copy(disk[mb:], fatImg)
+	copy(disk[34*mb:], exImg)
+	starts := []int64{mb, 34 * mb}
+	fatSecs := uint32(len(fatImg) / 512)
+	switch scheme {
+	case "mbr":
+		putMBRSlot(disk, 0, 0x0C, 2048, fatSecs)
+		putMBRSlot(disk, 1, 0x07, uint32(34*mb/512), uint32(len(exImg)/512))
+	case "gpt":
+		putGPT(disk, []gptTestEntry{
+			{guidBasicData, 2048, uint64(2048 + fatSecs - 1), "fat-vol"},
+			{guidBasicData, 34 * mb / 512, 34*mb/512 + uint64(len(exImg)/512) - 1, "exfat-vol"},
+		})
+	default:
+		t.Fatalf("unknown scheme %q", scheme)
+	}
+	path := filepath.Join(t.TempDir(), scheme+"-fat.img")
+	if err := os.WriteFile(path, disk, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path, starts
+}
+
+// Auto-seed must find FAT + exFAT partitions by content (MBR type 0x07
+// covers both NTFS and exFAT, so probing — not the type byte — decides).
+func TestScanFSVolumesAutoSeedFAT(t *testing.T) {
+	for _, scheme := range []string{"mbr", "gpt"} {
+		path, starts := composeFATDisk(t, scheme)
+		kinds, auto := scanAll(t, path, 0, true)
+		if !reflect.DeepEqual(kinds, []string{"fat", "exfat"}) {
+			t.Errorf("%s: kinds %v, want [fat exfat]", scheme, kinds)
+		}
+		if len(auto) == 0 {
+			t.Fatalf("%s: auto-seed found no detections", scheme)
+		}
+		for _, d := range auto {
+			if d.FileName == "" {
+				t.Errorf("%s: detection without filename: %+v", scheme, d)
+			}
+		}
+		var manual []Detection
+		for _, base := range starts {
+			_, dets := scanAll(t, path, base, false)
+			manual = append(manual, dets...)
+		}
+		if !reflect.DeepEqual(auto, manual) {
+			t.Errorf("%s: auto-seed differs from manual scans:\nauto=%v\nmanual=%v", scheme, auto, manual)
+		}
+	}
+}
+
 func TestResolveVolumesLoudErrors(t *testing.T) {
 	blank := filepath.Join(t.TempDir(), "blank.img")
 	if err := os.WriteFile(blank, make([]byte, 4096), 0644); err != nil {
@@ -311,7 +377,7 @@ func TestResolveVolumesLoudErrors(t *testing.T) {
 	}
 	if _, err := resolveVolumes(rawPath, 0, true); err == nil {
 		t.Error("raw-only table with auto-seed must error")
-	} else if !strings.Contains(err.Error(), "none opens as NTFS/ext") || !strings.Contains(err.Error(), "mbr-type-da") {
+	} else if !strings.Contains(err.Error(), "none opens as NTFS/ext/FAT/exFAT") || !strings.Contains(err.Error(), "mbr-type-da") {
 		t.Errorf("raw-only error must list the layout tried: %v", err)
 	}
 	disk, _ := composeDisk(t, "mbr")

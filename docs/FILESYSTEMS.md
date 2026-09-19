@@ -2,9 +2,9 @@
 
 Raw scanning finds wallet traces anywhere, but it loses filenames, wastes
 time on live data, and cannot tell a deleted file from noise. The
-filesystem layer reads NTFS and ext metadata so deleted-but-referenced
-files come back **with their names**, and raw scans can skip everything
-still allocated.
+filesystem layer reads NTFS, ext, FAT, and exFAT metadata so
+deleted-but-referenced files come back **with their names**, and raw
+scans can skip everything still allocated.
 
 ## Modes
 
@@ -20,8 +20,10 @@ Scan only free space (deleted content, no filenames):
 `-fs-offset` pins one volume boot sector by hand (concatenated
 evidences, hand-verified layouts). When it is omitted, MBR and GPT
 partition tables are followed automatically: every partition that opens
-as NTFS/ext is scanned, so a full-disk capture needs no manual offset.
-Hybrid MBR+GPT layouts, corrupt tables, and disks with no NTFS/ext
+as NTFS/ext/FAT/exFAT is scanned, so a full-disk capture needs no manual
+offset. Partitions are probed by content, not by type byte (MBR type
+0x07 covers NTFS, exFAT, and more).
+Hybrid MBR+GPT layouts, corrupt tables, and disks with no supported
 partition error loudly with the layout described instead of scanning
 the wrong bytes; `-unallocated-only` seeds from the same partitions.
 Sector size is assumed 512 bytes. Regenerate the sfdisk cross-check
@@ -45,6 +47,19 @@ re-associate names to deleted inodes), and residual zeroed entries —
 including names hiding in merged `rec_len` slack. Block bitmaps drive
 unallocated-only. Orphan content with no surviving name is stamped
 `inode:N`.
+
+**FAT** (12/16/32, picked by cluster count) reads the file allocation
+tables plus short and long-name directory entries, including fixed-root
+FAT12/16 volumes. Deletion zeroes the FAT chain and the name's first
+byte, so recovery is an honest prefix: the surviving first cluster is
+scanned and the hit is stamped with the mangled name (`?ELETED.BIN`).
+FAT12's 12-bit packing and odd-cluster entries are covered. The FAT
+itself drives unallocated-only.
+
+**exFAT** reads the bitmap, the allocation-bitmap entry, and the
+file/stream/name entry sets. Deleted entries keep their full names
+(InUse bits only), and files written with NoFATChain recover whole
+even with a zeroed FAT. The allocation bitmap drives unallocated-only.
 
 **Out of scope:** APFS; RAID rebuild; double/triple-indirect ext blocks;
 compressed/encrypted/sparse NTFS content (parsed structurally, read back

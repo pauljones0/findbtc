@@ -14,8 +14,8 @@ type FSVol interface {
 	Unallocated() ([]FSExtent, error)
 }
 
-// OpenFS detects the filesystem at base (NTFS, then ext) and returns its
-// kind label ("ntfs", "ext") plus the volume.
+// OpenFS detects the filesystem at base (NTFS, ext, FAT12/16/32, exFAT)
+// and returns its kind label plus the volume.
 func OpenFS(r io.ReaderAt, base int64) (string, FSVol, error) {
 	if vol, err := OpenNTFS(r, base); err == nil {
 		return "ntfs", vol, nil
@@ -23,7 +23,13 @@ func OpenFS(r io.ReaderAt, base int64) (string, FSVol, error) {
 	if vol, err := OpenExt(r, base); err == nil {
 		return "ext", vol, nil
 	}
-	return "", nil, fmt.Errorf("no NTFS or ext filesystem at offset %d (for a full-disk image, omit -fs-offset to follow its partition table)", base)
+	if vol, err := OpenFAT(r, base); err == nil {
+		return "fat", vol, nil
+	}
+	if vol, err := OpenExFAT(r, base); err == nil {
+		return "exfat", vol, nil
+	}
+	return "", nil, fmt.Errorf("no NTFS, ext, FAT, or exFAT filesystem at offset %d (for a full-disk image, omit -fs-offset to follow its partition table)", base)
 }
 
 // volumeTarget is one filesystem to scan: its base offset and kind.
@@ -34,7 +40,8 @@ type volumeTarget struct {
 
 // resolveVolumes returns the scan targets for path. With autoSeed and no
 // volume at base, the partition table is followed and every partition
-// that opens as NTFS/ext becomes a target. Every failure names the path,
+// that opens as a supported filesystem (NTFS/ext/FAT/exFAT) becomes a
+// target. Every failure names the path,
 // the offset tried, and what the layout held, so a wrong-bytes scan is
 // impossible: unknown layouts error, never guess.
 func resolveVolumes(path string, base int64, autoSeed bool) ([]volumeTarget, error) {
@@ -50,7 +57,7 @@ func resolveVolumes(path string, base int64, autoSeed bool) ([]volumeTarget, err
 	} else {
 		parts, perr := ScanPartitions(f)
 		if perr != nil {
-			return nil, fmt.Errorf("%s: no NTFS or ext filesystem at offset %d, and no usable partition table (%v); point -fs-offset at a volume boot sector", path, base, perr)
+			return nil, fmt.Errorf("%s: no NTFS, ext, FAT, or exFAT filesystem at offset %d, and no usable partition table (%v); point -fs-offset at a volume boot sector", path, base, perr)
 		}
 		var targets []volumeTarget
 		var descs []string
@@ -67,7 +74,7 @@ func resolveVolumes(path string, base int64, autoSeed bool) ([]volumeTarget, err
 			targets = append(targets, volumeTarget{base: p.Start, kind: kind})
 		}
 		if len(targets) == 0 {
-			return nil, fmt.Errorf("%s: partition table holds %d entries (%s) but none opens as NTFS/ext (first: %v); point -fs-offset at a volume boot sector", path, len(parts), strings.Join(descs, "; "), firstProbeErr)
+			return nil, fmt.Errorf("%s: partition table holds %d entries (%s) but none opens as NTFS/ext/FAT/exFAT (first: %v); point -fs-offset at a volume boot sector", path, len(parts), strings.Join(descs, "; "), firstProbeErr)
 		}
 		return targets, nil
 	}
@@ -88,7 +95,8 @@ func ScanFS(path string, base int64, opts Options, onDetection func(Detection), 
 }
 
 // ScanFSVolumes scans one volume (autoSeed false, at base) or every
-// NTFS/ext volume found by following the partition table (autoSeed true,
+// supported volume (NTFS/ext/FAT/exFAT) found by following the
+// partition table (autoSeed true,
 // falling back to the volume at base when one opens there). It returns
 // the kind label of each volume scanned, in scan order. Any callback may
 // be nil.
@@ -185,8 +193,9 @@ func UnallocatedRanges(path string, base int64) (string, []FSExtent, error) {
 }
 
 // UnallocatedRangesAuto returns the merged free-space extents of one
-// volume (autoSeed false, at base) or of every NTFS/ext volume found by
-// following the partition table (autoSeed true), plus each kind label.
+// volume (autoSeed false, at base) or of every supported volume found
+// by following the partition table (autoSeed true), plus each kind
+// label.
 func UnallocatedRangesAuto(path string, base int64, autoSeed bool) ([]string, []FSExtent, error) {
 	targets, err := resolveVolumes(path, base, autoSeed)
 	if err != nil {

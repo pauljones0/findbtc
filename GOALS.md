@@ -42,8 +42,8 @@ completely solve the pain point?"**
 | 21 | Container image | complete | 97ef967 |
 | 22 | Pipeline ingest evaluation | complete | 2525e43 |
 | 23 | Owner "what's next" guide + anti-scam shield | complete | 4bed9b8 |
-| 24 | Exit-on-hit + CI gating | complete | - |
-| 25 | FAT/exFAT filesystem support | active | - |
+| 24 | Exit-on-hit + CI gating | complete | 0bb1793 |
+| 25 | FAT/exFAT filesystem support | complete | - |
 | 26 | Salvage validation | queued | - |
 | 27 | Guided mode (-advise) | queued | - |
 | 28 | Embedding pass (quiet + cancel) | queued | - |
@@ -689,11 +689,11 @@ case falls back to filename-less raw carving with PhotoRec's known
 weaknesses (fragmentation, no names, live/deleted conflation).
 
 **Completely solved when:**
-- [ ] FAT12/16/32 + exFAT volumes inventory live and deleted entries
+- [x] FAT12/16/32 + exFAT volumes inventory live and deleted entries
       with names behind the existing volume interface, auto-seed
       through the partition table, and stamp `file=` on hits like
       NTFS/ext.
-- [ ] Same FP bar per format (silence on random + prose, enforced by
+- [x] Same FP bar per format (silence on random + prose, enforced by
       tests); recovered entries cross-checked against Sleuth Kit
       `fls`/`icat` on fixtures.
 

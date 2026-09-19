@@ -90,6 +90,86 @@ func TestScanFSExt(t *testing.T) {
 	}
 }
 
+// ScanFS over the synthetic FAT32 image: the deleted entry's surviving
+// prefix scans and its hits carry the mangled (first char lost) name.
+func TestScanFSFAT(t *testing.T) {
+	path := buildTestFAT32(t)
+	var inventory []FSEntry
+	var dets []Detection
+	kind, err := ScanFS(path, 0, Options{}, func(d Detection) {
+		dets = append(dets, d)
+	}, func(ProgressInfo) {}, func(_ string, e FSEntry) {
+		inventory = append(inventory, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != "fat" {
+		t.Errorf("kind %q, want fat", kind)
+	}
+	foundLive, foundDel := false, false
+	for _, e := range inventory {
+		if e.Name == "LIVE.TXT" && !e.Deleted {
+			foundLive = true
+		}
+		if e.Name == "?ELETED.BIN" && e.Deleted {
+			foundDel = true
+		}
+	}
+	if !foundLive || !foundDel {
+		t.Errorf("inventory lacks live+deleted: %v", inventory)
+	}
+	var named []Detection
+	for _, d := range dets {
+		if d.FileName == "?ELETED.BIN" {
+			named = append(named, d)
+		}
+	}
+	if len(named) != 1 {
+		t.Fatalf("?ELETED.BIN hits %v, want 1 bestblock", dets)
+	}
+}
+
+// ScanFS over the synthetic exFAT image: the NoFATChain deleted file
+// recovers whole and its hits carry the surviving name.
+func TestScanFSExFAT(t *testing.T) {
+	path := buildTestExFAT(t)
+	var inventory []FSEntry
+	var dets []Detection
+	kind, err := ScanFS(path, 0, Options{}, func(d Detection) {
+		dets = append(dets, d)
+	}, func(ProgressInfo) {}, func(_ string, e FSEntry) {
+		inventory = append(inventory, e)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != "exfat" {
+		t.Errorf("kind %q, want exfat", kind)
+	}
+	foundLive, foundDel := false, false
+	for _, e := range inventory {
+		if e.Name == "live.txt" && !e.Deleted {
+			foundLive = true
+		}
+		if e.Name == "gone.bin" && e.Deleted {
+			foundDel = true
+		}
+	}
+	if !foundLive || !foundDel {
+		t.Errorf("inventory lacks live+deleted: %v", inventory)
+	}
+	var named []Detection
+	for _, d := range dets {
+		if d.FileName == "gone.bin" {
+			named = append(named, d)
+		}
+	}
+	if len(named) != 1 {
+		t.Fatalf("gone.bin hits %v, want 1 bestblock", dets)
+	}
+}
+
 // Unallocated-only scanning finds traces in free space and skips identical
 // traces in allocated blocks.
 func TestScanRangesSkipsLive(t *testing.T) {

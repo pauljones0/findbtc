@@ -9,7 +9,7 @@ import (
 	"unicode/utf16"
 )
 
-// Partition tables (Goal 12). Full-disk images bury NTFS/ext volumes at
+// Partition tables (Goal 12). Full-disk images bury filesystem volumes at
 // partition offsets; this parser follows the common PC schemes (MBR with
 // EBR-chained logicals, GPT behind a protective MBR) so `-fs` can seed
 // itself without a hand-found `-fs-offset`.
