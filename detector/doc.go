@@ -43,6 +43,16 @@
 // constants (GZIP_HEADER, ZIP_*), and anything else this comment does
 // not name. Do not build on these.
 //
+// # Embedding
+//
+// Servers route diagnostics through Options.Log (nil writes stderr,
+// exactly as the CLI; io.Discard silences) and enforce deadlines
+// through Options.Context (nil runs to completion). A cancelled scan
+// returns ctx.Err() promptly: detections already delivered stay
+// delivered, the checkpoint journal keeps its last completed mark,
+// the case log records status "canceled", and no pipeline goroutine
+// leaks. Callbacks must return; a blocked callback blocks shutdown.
+//
 // # Known warts
 //
 //   - Results stream through callbacks; there is no slice-returning
@@ -53,10 +63,6 @@
 //     the journal offset back as startOffset. Range scans resume
 //     inside the detector via Options.Resume.
 //   - Progress callbacks fire often; keep them cheap or pass nil.
-//     Separately, the detector writes diagnostic lines ([scan],
-//     [checkpoint], [carve] warnings) to stderr unconditionally —
-//     there is no quiet switch or log redirect yet, so embedding
-//     programs should expect noisy stderr.
 //   - Detection.Target for archive members names the member stream
 //     ("Zipfile #0 @ byte 0 in [...]"), not a filesystem path.
 //   - Detections are candidates keyed by needle label, not proof of a

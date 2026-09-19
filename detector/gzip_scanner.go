@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 )
 
 // GZIP format: https://tools.ietf.org/html/rfc1952
@@ -72,7 +71,7 @@ func (r *gzipTargetReader) Close() error {
 	return r.r.Close()
 }
 
-func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget) {
+func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer) {
 	openedFiles := 0
 	for {
 		var block *Block
@@ -106,7 +105,7 @@ func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sc
 			// Occurrences fully inside the overlap prefix were already
 			// handled with the previous block.
 			if abs+len(GZIP_HEADER) > block.overlap && gzipHeaderPlausible(data[abs:]) {
-				openedFiles += scanGzipFile(block.source, block.offset+int64(abs), scanTargets)
+				openedFiles += scanGzipFile(block.source, block.offset+int64(abs), scanTargets, log)
 			}
 			i = abs + 1
 		}
@@ -134,9 +133,9 @@ func gzipHeaderPlausible(tail []byte) bool {
 	return tail[2] == 8 && tail[3]&0xE0 == 0
 }
 
-func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget) int {
+func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget, log io.Writer) int {
 	if source.Depth()+1 > maxArchiveDepth {
-		fmt.Fprintf(os.Stderr, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
+		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
 		return 0
 	}
 	// Sanity check

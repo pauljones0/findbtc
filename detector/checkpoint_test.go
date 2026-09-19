@@ -111,7 +111,7 @@ func TestRangeResumeKillMidRange(t *testing.T) {
 		t.Fatal("fixture produced no detections")
 	}
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
-	writeCheckpointRange(ckpt, path, ranges, 1, O)
+	writeCheckpointRange(nil, ckpt, path, ranges, 1, O)
 	// Run 1 output: everything strictly before block O.
 	prefix := []FSExtent{ranges[0], {Start: ranges[1].Start, Len: O - ranges[1].Start}}
 	before := scanRangeList(t, path, prefix, Options{})
@@ -136,7 +136,7 @@ func TestRangeResumeKillBetweenRanges(t *testing.T) {
 	path, ranges, _ := rangeResumeFixture(t)
 	full := scanRangeList(t, path, ranges, Options{})
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
-	writeCheckpointRange(ckpt, path, ranges, 0, ranges[0].Start+ranges[0].Len)
+	writeCheckpointRange(nil, ckpt, path, ranges, 0, ranges[0].Start+ranges[0].Len)
 	before := scanRangeList(t, path, ranges[:1], Options{})
 	after := scanRangeList(t, path, ranges, Options{CheckpointPath: ckpt, Resume: true})
 	if ok, why := detListEqual(append(before, after...), full); !ok {
@@ -149,33 +149,33 @@ func TestRangeResumeMismatch(t *testing.T) {
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
 	cases := map[string]func() (string, []FSExtent, string){
 		"shortened range": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, path, ranges, 1, O)
+			writeCheckpointRange(nil, ckpt, path, ranges, 1, O)
 			bad := append([]FSExtent{}, ranges...)
 			bad[1].Len--
 			return ckpt, bad, "does not match"
 		},
 		"reordered": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, path, ranges, 1, O)
+			writeCheckpointRange(nil, ckpt, path, ranges, 1, O)
 			return ckpt, []FSExtent{ranges[1], ranges[0], ranges[2]}, "does not match"
 		},
 		"dropped range": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, path, ranges, 1, O)
+			writeCheckpointRange(nil, ckpt, path, ranges, 1, O)
 			return ckpt, ranges[:2], "does not match"
 		},
 		"wrong path": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, "/other/file.bin", ranges, 1, O)
+			writeCheckpointRange(nil, ckpt, "/other/file.bin", ranges, 1, O)
 			return ckpt, ranges, "not " + path
 		},
 		"legacy journal": func() (string, []FSExtent, string) {
-			writeCheckpoint(ckpt, path, O)
+			writeCheckpoint(nil, ckpt, path, O)
 			return ckpt, ranges, "no range list"
 		},
 		"index out of range": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, path, ranges, 9, O)
+			writeCheckpointRange(nil, ckpt, path, ranges, 9, O)
 			return ckpt, ranges, "beyond"
 		},
 		"offset outside range": func() (string, []FSExtent, string) {
-			writeCheckpointRange(ckpt, path, ranges, 1, ranges[2].Start+100)
+			writeCheckpointRange(nil, ckpt, path, ranges, 1, ranges[2].Start+100)
 			return ckpt, ranges, "outside range"
 		},
 	}
@@ -215,7 +215,7 @@ func TestRangeResumeAlreadyComplete(t *testing.T) {
 	path, ranges, _ := rangeResumeFixture(t)
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
 	last := ranges[len(ranges)-1]
-	writeCheckpointRange(ckpt, path, ranges, len(ranges)-1, last.Start+last.Len)
+	writeCheckpointRange(nil, ckpt, path, ranges, len(ranges)-1, last.Start+last.Len)
 	var dets []Detection
 	if err := ScanRangesWithOptions(path, ranges, Options{CheckpointPath: ckpt, Resume: true},
 		func(d Detection) { dets = append(dets, d) }, func(ProgressInfo) {}); err != nil {

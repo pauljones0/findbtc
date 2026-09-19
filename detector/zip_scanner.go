@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"os"
 )
 
 // This implements a forensic system for discovering and decoding zipfiles
@@ -119,7 +118,7 @@ func (c *closableBytesReader) Close() error {
 	return nil
 }
 
-func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget) {
+func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer) {
 	openedFiles := 0
 	// Local-header candidates are speculative: they flush at each target's
 	// end-of-stream, when intact archives have already claimed their bytes,
@@ -136,7 +135,7 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 		}
 
 		if block == EOF {
-			openedFiles += flushZipCandidates(&pending, &published, scanTargets)
+			openedFiles += flushZipCandidates(&pending, &published, scanTargets, log)
 			pending = nil
 			if openedFiles > 0 {
 				openedFiles -= 1
@@ -161,7 +160,7 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 			// Occurrences fully inside the overlap prefix were already
 			// handled with the previous block.
 			if abs+len(ZIP_ECD_HEADER) > block.overlap {
-				openedFiles += scanZipFile(block.source, block.offset+int64(abs), scanTargets, &published)
+				openedFiles += scanZipFile(block.source, block.offset+int64(abs), scanTargets, &published, log)
 			}
 			i = abs + 1
 		}
@@ -189,9 +188,9 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 	}
 }
 
-func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTargets chan scanTarget, published *[]zipRange) int {
+func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTargets chan scanTarget, published *[]zipRange, log io.Writer) int {
 	if source.Depth()+1 > maxArchiveDepth {
-		fmt.Fprintf(os.Stderr, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
+		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
 		return 0
 	}
 	startOffset, size, err := readZipFileSize(source, endOfCentralDirectoryOffset)
@@ -222,7 +221,7 @@ func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTarge
 	newScanTargets := 0
 	for fileIndex, fileInfo := range reader.File {
 		if fileInfo.UncompressedSize64 > uint64(maxZipMemberBytes) {
-			fmt.Fprintf(os.Stderr, "[scan] Skipping %d-byte member %q: over the %d-byte inflation cap\n",
+			logLinef(log, "[scan] Skipping %d-byte member %q: over the %d-byte inflation cap\n",
 				fileInfo.UncompressedSize64, fileInfo.Name, maxZipMemberBytes)
 			continue
 		}

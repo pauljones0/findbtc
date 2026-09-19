@@ -3,6 +3,7 @@ package detector
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -27,25 +28,25 @@ const checkpointBlockInterval = 256
 
 // writeCheckpoint atomically records that path is scanned up to offset.
 // Journal failures warn; they must never fail the scan itself.
-func writeCheckpoint(file, path string, offset int64) {
-	writeCheckpointData(file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC()})
+func writeCheckpoint(log io.Writer, file, path string, offset int64) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC()})
 }
 
 // writeCheckpointRange atomically records range-scan progress: ranges is
 // the full range list (for resume validation), index the range in flight,
 // offset the absolute file offset scanned up to within it.
-func writeCheckpointRange(file, path string, ranges []FSExtent, index int, offset int64) {
-	writeCheckpointData(file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index})
+func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index})
 }
 
-func writeCheckpointData(file string, cp Checkpoint) {
+func writeCheckpointData(log io.Writer, file string, cp Checkpoint) {
 	raw, err := json.Marshal(cp)
 	if err != nil {
 		return
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(file), ".findbtc-checkpoint-*")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[checkpoint] warning: %s\n", err.Error())
+		logLinef(log, "[checkpoint] warning: %s\n", err.Error())
 		return
 	}
 	tmpName := tmp.Name()
@@ -53,7 +54,7 @@ func writeCheckpointData(file string, cp Checkpoint) {
 	cerr := tmp.Close()
 	if werr != nil || cerr != nil || os.Rename(tmpName, file) != nil {
 		os.Remove(tmpName)
-		fmt.Fprintf(os.Stderr, "[checkpoint] warning: cannot write %s\n", file)
+		logLinef(log, "[checkpoint] warning: cannot write %s\n", file)
 	}
 }
 

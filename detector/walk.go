@@ -71,8 +71,10 @@ func (s *WalkStats) fail(path string, err error) {
 // Walk scans the file or directory tree at root. It returns stats and a
 // nil error whenever the sweep itself ran; per-file failures land in
 // stats, never in the returned error. A non-nil error means the walk
-// could not start (bad root, checkpoint requested). Either callback may
-// be nil.
+// could not start (bad root, checkpoint requested) — or that
+// wopts.Scan.Context was canceled, in which case stats cover the files
+// finished before cancellation and the error is ctx.Err(). Either
+// callback may be nil.
 func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgress func(ProgressInfo)) (WalkStats, error) {
 	var stats WalkStats
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
@@ -105,7 +107,9 @@ func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgres
 		seqBase: &seqBase,
 	}
 	if !info.IsDir() {
-		w.scanFile(root)
+		if err := w.scanFile(root); err != nil {
+			return stats, err
+		}
 		return stats, nil
 	}
 	abs, err := filepath.Abs(root)
@@ -119,7 +123,9 @@ func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgres
 		}
 		w.visited = map[string]bool{abs: true}
 	}
-	w.recurse(abs, 0)
+	if err := w.recurse(abs, 0); err != nil {
+		return stats, err
+	}
 	return stats, nil
 }
 
@@ -158,13 +164,16 @@ func (w *walker) isOwnOutput(abs string) bool {
 	return w.caseLog != "" && abs == w.caseLog
 }
 
-func (w *walker) scanFile(path string) {
+func (w *walker) scanFile(path string) error {
+	if err := w.wopts.Scan.scanContext().Err(); err != nil {
+		return err
+	}
 	// The pipeline logs an unreadable target but still reports
 	// completion, so probe readability here to keep Failed honest:
 	// a sweep must never silently claim coverage it did not get.
 	if f, err := os.Open(path); err != nil {
 		w.stats.fail(path, err)
-		return
+		return nil
 	} else {
 		f.Close()
 	}
@@ -179,17 +188,29 @@ func (w *walker) scanFile(path string) {
 	*w.seqBase += n
 	w.stats.Detections += int64(n)
 	if err != nil {
+		// Cancellation stops the sweep; anything else is one
+		// file's failure among many.
+		if cerr := w.wopts.Scan.scanContext().Err(); cerr != nil {
+			return cerr
+		}
 		w.stats.fail(path, err)
 	}
+	return nil
 }
 
-func (w *walker) recurse(abs string, depth int) {
+func (w *walker) recurse(abs string, depth int) error {
+	if err := w.wopts.Scan.scanContext().Err(); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(abs)
 	if err != nil {
 		w.stats.fail(abs, err)
-		return
+		return nil
 	}
 	for _, e := range entries {
+		if err := w.wopts.Scan.scanContext().Err(); err != nil {
+			return err
+		}
 		child := filepath.Join(abs, e.Name())
 		childDepth := depth + 1
 		if w.wopts.MaxDepth > 0 && childDepth > w.wopts.MaxDepth {
@@ -203,50 +224,56 @@ func (w *walker) recurse(abs string, depth int) {
 		mode := e.Type()
 		switch {
 		case mode.IsDir():
-			w.recurse(child, childDepth)
+			if err := w.recurse(child, childDepth); err != nil {
+				return err
+			}
 		case mode.IsRegular():
-			w.scanFile(child)
+			if err := w.scanFile(child); err != nil {
+				return err
+			}
 		case mode&os.ModeSymlink != 0:
-			w.followLink(child, childDepth)
+			if err := w.followLink(child, childDepth); err != nil {
+				return err
+			}
 		default:
 			// Sockets, fifos, devices: never scanned.
 			w.stats.SkippedSpecial++
 		}
 	}
+	return nil
 }
 
 // followLink handles one symlink per policy.
-func (w *walker) followLink(path string, depth int) {
+func (w *walker) followLink(path string, depth int) error {
 	if !w.wopts.FollowSymlinks {
 		w.stats.SkippedSymlinks++
-		return
+		return nil
 	}
 	target, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		w.stats.fail(path, fmt.Errorf("broken or looped symlink: %w", err))
-		return
+		return nil
 	}
 	if w.isOwnOutput(target) {
 		w.stats.SkippedOwn++
-		return
+		return nil
 	}
 	info, err := os.Stat(target)
 	if err != nil {
 		w.stats.fail(path, err)
-		return
+		return nil
 	}
 	if info.IsDir() {
 		if w.visited[target] {
 			w.stats.fail(path, fmt.Errorf("symlink cycle: %s already visited", target))
-			return
+			return nil
 		}
 		w.visited[target] = true
-		w.recurse(target, depth)
-		return
+		return w.recurse(target, depth)
 	}
 	if info.Mode().IsRegular() {
-		w.scanFile(target)
-		return
+		return w.scanFile(target)
 	}
 	w.stats.SkippedSpecial++
+	return nil
 }

@@ -47,7 +47,7 @@ type carveConfig struct {
 // plus a JSON sidecar, and records the file on d. Carving is best-effort: a
 // failure is returned but the caller still reports the detection. Bytes are
 // streamed so large contexts never sit fully in memory.
-func carveDetection(source scanTarget, d *Detection, dir string, contextBytes int64, seq int) error {
+func carveDetection(source scanTarget, d *Detection, dir string, contextBytes int64, seq int, log io.Writer) error {
 	if contextBytes < 0 {
 		contextBytes = 0
 	}
@@ -84,7 +84,7 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 	d.CarvePath = binPath
 
 	if info, err := classifyCarve(binPath, d.Offset-start, d.Offset-start+int64(d.MatchLen), written); err != nil {
-		fmt.Fprintf(os.Stderr, "[carve] warning: could not classify %s: %s\n", binPath, err.Error())
+		logLinef(log, "[carve] warning: could not classify %s: %s\n", binPath, err.Error())
 	} else {
 		d.Carve = info
 	}
@@ -96,7 +96,7 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 
 	// Best-effort salvage: reassemble database pages from the carve into a
 	// .salvage.db file with a page map, when at least two pages stitch.
-	d.Salvage = carveSalvage(binPath, start, dir, seq)
+	d.Salvage = carveSalvage(binPath, start, dir, seq, log)
 
 	sidecar, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
@@ -242,7 +242,7 @@ func carveHashes(binPath string, baseAbs int64) []CrackHash {
 // carveSalvage re-reads a carved file (bounded) and attempts database
 // salvage, writing hit-NNNNNN.salvage.db beside the carve on success.
 // baseAbs is the target offset of the carve's first byte.
-func carveSalvage(binPath string, baseAbs int64, dir string, seq int) *SalvageInfo {
+func carveSalvage(binPath string, baseAbs int64, dir string, seq int, log io.Writer) *SalvageInfo {
 	f, err := os.Open(binPath)
 	if err != nil {
 		return nil
@@ -261,7 +261,7 @@ func carveSalvage(binPath string, baseAbs int64, dir string, seq int) *SalvageIn
 	}
 	salvPath := filepath.Join(dir, fmt.Sprintf("hit-%06d.salvage.db", seq))
 	if err := os.WriteFile(salvPath, r.Image, 0644); err != nil {
-		fmt.Fprintf(os.Stderr, "[carve] warning: could not write salvage %s: %s\n", salvPath, err.Error())
+		logLinef(log, "[carve] warning: could not write salvage %s: %s\n", salvPath, err.Error())
 		return nil
 	}
 	r.Info.Path = salvPath

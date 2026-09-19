@@ -45,8 +45,8 @@ completely solve the pain point?"**
 | 24 | Exit-on-hit + CI gating | complete | 0bb1793 |
 | 25 | FAT/exFAT filesystem support | complete | 61abf5b |
 | 26 | Salvage validation | complete | e13d569 |
-| 27 | Guided mode (-advise) | complete | - |
-| 28 | Embedding pass (quiet + cancel) | queued | - |
+| 27 | Guided mode (-advise) | complete | 938d490 |
+| 28 | Embedding pass (quiet + cancel) | complete | - |
 | 29 | Baseline/allowlist for repeat sweeps | queued | - |
 | 30 | Offline secret verification | queued | - |
 
@@ -771,9 +771,9 @@ cancellation — a server embedding a long scan can neither route logs
 nor enforce a deadline.
 
 **Completely solved when:**
-- [ ] `Options.Log io.Writer` routes all library diagnostics (nil =
+- [x] `Options.Log io.Writer` routes all library diagnostics (nil =
       stderr, default output byte-identical, proven by test).
-- [ ] `Options.Context` (nil = Background) cancels a scan promptly
+- [x] `Options.Context` (nil = Background) cancels a scan promptly
       with documented semantics (partial results, checkpoint left
       behind, no goroutine leaks — tested).
 

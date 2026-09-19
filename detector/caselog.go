@@ -21,7 +21,7 @@ type CaseLog struct {
 	Version    string        `json:"version"`
 	Started    string        `json:"started"`
 	Finished   string        `json:"finished"`
-	Status     string        `json:"status"` // "complete" or "error"
+	Status     string        `json:"status"` // "complete", "error", or "canceled"
 	Error      string        `json:"error,omitempty"`
 	Source     CaseSource    `json:"source"`
 	Hash       CaseHash      `json:"hash"`
@@ -132,7 +132,8 @@ func caseKind(seed scanTarget) string {
 	}
 }
 
-// finish builds the record. status is "complete" or "error".
+// finish builds the record. status is "complete", "error", or
+// "canceled" (caller-cancelled scans record partial hashes honestly).
 func (r *caseRecorder) finish(status string, runErr error) CaseLog {
 	r.mu.Lock()
 	defer r.mu.Unlock()

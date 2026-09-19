@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"os"
 )
 
 // Single-entry recovery for zip archives whose end-of-central-directory
@@ -126,11 +125,11 @@ func headerBytes(source scanTarget, data []byte, abs, dataAbs, dataLen int64, n 
 
 // flushZipCandidates publishes pending local-header entries not already
 // covered by an intact archive, and reports how many were published.
-func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTargets chan scanTarget) int {
+func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTargets chan scanTarget, log io.Writer) int {
 	n := 0
 	for _, c := range *pending {
 		if c.source.Depth()+1 > maxArchiveDepth {
-			fmt.Fprintf(os.Stderr, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, c.source.Describe())
+			logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, c.source.Describe())
 			continue
 		}
 		covered := false

@@ -226,6 +226,20 @@ type Options struct {
 	// Flags records the invocation arguments in the case log; main sets
 	// it so a reviewer can reproduce the scan exactly.
 	Flags []string
+	// Log routes library diagnostics (scan progress notes, carve and
+	// checkpoint warnings). Nil writes to os.Stderr, exactly as
+	// before; set it to route logs anywhere else, or to io.Discard
+	// for quiet embedding. Detection output never goes here — it
+	// flows through the onDetection callback.
+	Log io.Writer
+	// Context cancels the scan. Nil means context.Background (run to
+	// completion). On cancellation ScanWithOptions and friends return
+	// promptly with ctx.Err(): detections already delivered stay
+	// delivered, the checkpoint journal keeps its last completed
+	// mark (no completion record is written), the case log (when
+	// enabled) records status "canceled", and no pipeline goroutine
+	// is left behind.
+	Context context.Context
 	// caseRec carries the active recorder from runPipeline to scanBlocks.
 	caseRec *caseRecorder
 }
@@ -240,6 +254,40 @@ const maxReadAttempts = 3
 
 func readRetryBackoff(attempt int) time.Duration {
 	return time.Duration(attempt) * 50 * time.Millisecond
+}
+
+// logWriter resolves the diagnostics sink: opts.Log, or os.Stderr
+// when nil. Every library diagnostic funnels through here (or the
+// logf helpers below), so embedding stays quiet on demand while the
+// default output is byte-identical.
+func (o Options) logWriter() io.Writer {
+	if o.Log != nil {
+		return o.Log
+	}
+	return os.Stderr
+}
+
+// logf writes one diagnostics line to the configured sink.
+func (o Options) logf(format string, args ...any) {
+	fmt.Fprintf(o.logWriter(), format, args...)
+}
+
+// logLinef writes to an explicit sink, defaulting nil to os.Stderr,
+// for helpers that receive the writer instead of full Options.
+func logLinef(w io.Writer, format string, args ...any) {
+	if w == nil {
+		w = os.Stderr
+	}
+	fmt.Fprintf(w, format, args...)
+}
+
+// scanContext resolves the cancellation context: opts.Context, or
+// context.Background when nil.
+func (o Options) scanContext() context.Context {
+	if o.Context != nil {
+		return o.Context
+	}
+	return context.Background()
 }
 
 // withDefaultCallbacks replaces nil scan callbacks with no-ops, so
@@ -317,7 +365,7 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 		if opts.CheckpointPath == "" {
 			return fmt.Errorf("resume requires a checkpoint path")
 		}
-		idx, off, resume, err := readRangeResume(opts.CheckpointPath, path, ranges)
+		idx, off, resume, err := readRangeResume(opts.logWriter(), opts.CheckpointPath, path, ranges)
 		if err != nil {
 			return err
 		}
@@ -368,11 +416,11 @@ func rewindOffset(rangeStart, offset int64) int64 {
 // and offset to continue from; resume=false means the journal records a
 // completed list. A missing journal starts over (like single-target
 // resume); anything corrupt or mismatched refuses loudly.
-func readRangeResume(file, path string, ranges []FSExtent) (idx int, off int64, resume bool, err error) {
+func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (idx int, off int64, resume bool, err error) {
 	cp, err := ReadCheckpoint(file)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Fprintf(os.Stderr, "[checkpoint] No checkpoint at %s, starting from the beginning\n", file)
+			logLinef(log, "[checkpoint] No checkpoint at %s, starting from the beginning\n", file)
 			return 0, -1, true, nil
 		}
 		return 0, 0, false, err
@@ -404,11 +452,12 @@ func readRangeResume(file, path string, ranges []FSExtent) (idx int, off int64, 
 // the pipeline runs inside ScanRangesWithOptions, a legacy entry
 // otherwise.
 func writeScanCheckpoint(opts Options, target scanTarget, offset int64) {
+	log := opts.logWriter()
 	if opts.rangeCtx != nil {
-		writeCheckpointRange(opts.CheckpointPath, target.Describe(), opts.rangeCtx.ranges, opts.rangeCtx.index, offset)
+		writeCheckpointRange(log, opts.CheckpointPath, target.Describe(), opts.rangeCtx.ranges, opts.rangeCtx.index, offset)
 		return
 	}
-	writeCheckpoint(opts.CheckpointPath, target.Describe(), offset)
+	writeCheckpoint(log, opts.CheckpointPath, target.Describe(), offset)
 }
 
 // firstRangeDiff returns the first index where two range lists differ, or
@@ -440,8 +489,11 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	// Shutdown is coordinated through ctx: when the final EOF reaches
 	// detectWallets it reports completion, Scan returns, and the deferred
 	// cancel below tells every pipeline stage to exit. Channels are never
-	// closed while another goroutine may still send on them.
-	ctx, cancel := context.WithCancel(context.Background())
+	// closed while another goroutine may still send on them. The caller's
+	// opts.Context (Background when nil) is the parent, so cancelling it
+	// stops every stage the same way.
+	userCtx := opts.scanContext()
+	ctx, cancel := context.WithCancel(userCtx)
 	defer cancel()
 
 	var rec *caseRecorder
@@ -490,34 +542,44 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	go scanBlocks(ctx, scanTargets, emptyBlocks, zipDetectionQueue, onProgress, opts)
 
 	// 2. Pass blocks to zipfile detection; any files found will be published as new targets
-	go scanZipFiles(ctx, zipDetectionQueue, gzipDetectionQueue, scanTargets)
+	go scanZipFiles(ctx, zipDetectionQueue, gzipDetectionQueue, scanTargets, opts.logWriter())
 
 	// 3. Pass blocks to gzip file detection; any files found will be published as new targets
-	go scanGzipFiles(ctx, gzipDetectionQueue, walletDetectionQueue, scanTargets)
+	go scanGzipFiles(ctx, gzipDetectionQueue, walletDetectionQueue, scanTargets, opts.logWriter())
 
 	// 3. And, finally, pass raw and uncompressed blocks both to wallet detection
-	go detectWallets(walletDetectionQueue, emptyBlocks, onDetection, onComplete,
-		carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes, seqStart: opts.CarveSeqStart}, opts.Reveal, secrets)
+	go detectWallets(ctx, walletDetectionQueue, emptyBlocks, onDetection, onComplete, opts, secrets)
 
 	// Publish the seed target to scan
 	scanTargets <- seed
 
-	// Wait for system to signal outcome
-	signal := <-signals
-	if rec != nil {
-		status, runErr := "complete", error(nil)
-		if signal != io.EOF {
-			status, runErr = "error", signal
+	// Wait for the system to signal outcome — or for the caller to
+	// cancel, which returns promptly with ctx.Err(). Detections
+	// already delivered stay delivered; the checkpoint journal keeps
+	// its last completed mark (stages exit before writing more).
+	select {
+	case signal := <-signals:
+		if rec != nil {
+			status, runErr := "complete", error(nil)
+			if signal != io.EOF {
+				status, runErr = "error", signal
+			}
+			if err := appendCaseLog(opts.CaseLogPath, rec.finish(status, runErr)); err != nil {
+				return fmt.Errorf("case log: %w", err)
+			}
 		}
-		if err := appendCaseLog(opts.CaseLogPath, rec.finish(status, runErr)); err != nil {
-			return fmt.Errorf("case log: %w", err)
+		if signal == io.EOF {
+			return nil
 		}
+		return signal
+	case <-userCtx.Done():
+		if rec != nil {
+			if err := appendCaseLog(opts.CaseLogPath, rec.finish("canceled", userCtx.Err())); err != nil {
+				return fmt.Errorf("case log: %w", err)
+			}
+		}
+		return userCtx.Err()
 	}
-	if signal == io.EOF {
-		return nil
-	}
-
-	return signal
 }
 
 func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *Block, out chan *Block,
@@ -544,20 +606,20 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		checkpointRoot = firstTarget
 		firstTarget = false
 
-		fmt.Fprintf(os.Stderr, "[scan] Starting new target: %s\n", target.Describe())
+		opts.logf("[scan] Starting new target: %s\n", target.Describe())
 		totalBytes, err := target.Size()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[scan] Unable to scan target: %s\n", err.Error())
+			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
 			goto nextTarget
 		}
 
 		if f, err = target.Open(); err != nil {
-			fmt.Fprintf(os.Stderr, "[scan] Unable to scan target: %s\n", err.Error())
+			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
 			goto nextTarget
 		}
 
 		if _, err = f.Seek(target.StartOffset(), 0); err != nil {
-			fmt.Fprintf(os.Stderr, "[scan] Unable to scan target: %s\n", err.Error())
+			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
 			goto nextTarget
 		}
 
@@ -594,18 +656,18 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 					goto nextTarget
 				}
 				if read == 0 && !seekable {
-					fmt.Fprintf(os.Stderr, "[scan] Unable to scan target: %s\n", err.Error())
+					opts.logf("[scan] Unable to scan target: %s\n", err.Error())
 					emptyBlocks <- block
 					goto nextTarget
 				}
 				if read == 0 {
-					reportBadSector(target, currentOffset, currentOffset+blockSize, err, opts.OnBadSector)
+					reportBadSector(target, currentOffset, currentOffset+blockSize, err, opts.OnBadSector, opts.logWriter())
 					currentOffset += blockSize
 					haveTail = false
 					emptyBlocks <- block
 					// Position is indeterminate after failed reads.
 					if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
-						fmt.Fprintf(os.Stderr, "[scan] Unable to scan target: %s\n", serr.Error())
+						opts.logf("[scan] Unable to scan target: %s\n", serr.Error())
 						goto nextTarget
 					}
 					continue
@@ -720,8 +782,8 @@ func retryBlockRead(f TargetReader, buf []byte, offset int64) (read int, err err
 	return 0, err, true
 }
 
-func reportBadSector(target scanTarget, start, end int64, err error, onBadSector BadSectorFunc) {
-	fmt.Fprintf(os.Stderr, "[scan] Skipping unreadable bytes %d-%d in %s: %s\n",
+func reportBadSector(target scanTarget, start, end int64, err error, onBadSector BadSectorFunc, log io.Writer) {
+	logLinef(log, "[scan] Skipping unreadable bytes %d-%d in %s: %s\n",
 		start, end, target.Describe(), err.Error())
 	if onBadSector != nil {
 		onBadSector(target.Describe(), start, end, err)
@@ -765,9 +827,17 @@ var needles = [][]byte{
 // Scan blocks for traces of bitcoin wallets, the function will
 // wait in blocks on in until it sees EOF, and output scanned blocks
 // to out for reuse.
-func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), carve carveConfig, reveal bool, secrets bool) {
+func detectWallets(ctx context.Context, in chan *Block, out chan *Block, onDetection func(Detection), onComplete func(), opts Options, secrets bool) {
+	carve := carveConfig{dir: opts.CarveDir, contextBytes: opts.CarveContextBytes, seqStart: opts.CarveSeqStart}
+	reveal := opts.Reveal
 	seq := carve.seqStart
-	for block := range in {
+	for {
+		var block *Block
+		select {
+		case <-ctx.Done():
+			return
+		case block = <-in:
+		}
 		if block == EOF {
 			onComplete()
 			return
@@ -793,8 +863,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 					}
 					if carve.dir != "" {
 						seq++
-						if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-							fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+						if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+							opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 								needle, d.Target, d.Offset, err.Error())
 						}
 					}
@@ -829,8 +899,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 							label, d.Target, d.Offset, err.Error())
 					}
 				}
@@ -853,8 +923,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 							label, d.Target, d.Offset, err.Error())
 					}
 				}
@@ -880,8 +950,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 							label, d.Target, d.Offset, err.Error())
 					}
 				}
@@ -905,8 +975,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 					}
 					if carve.dir != "" {
 						seq++
-						if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-							fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+						if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+							opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 								m.label, d.Target, d.Offset, err.Error())
 						}
 					}
@@ -928,8 +998,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 							m.label, d.Target, d.Offset, err.Error())
 					}
 				}
@@ -950,8 +1020,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'eth-keystore' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve 'eth-keystore' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}
@@ -979,8 +1049,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'electrum-seed' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve 'electrum-seed' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}
@@ -999,8 +1069,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'electrum-file' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve 'electrum-file' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}
@@ -1019,8 +1089,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'descriptor' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve 'descriptor' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}
@@ -1043,8 +1113,8 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve '%s' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve '%s' at %s byte %d: %s\n",
 							label, d.Target, d.Offset, err.Error())
 					}
 				}
@@ -1063,14 +1133,18 @@ func detectWallets(in chan *Block, out chan *Block, onDetection func(Detection),
 				}
 				if carve.dir != "" {
 					seq++
-					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq); err != nil {
-						fmt.Fprintf(os.Stderr, "[carve] warning: could not carve 'metamask-vault' at %s byte %d: %s\n",
+					if err := carveDetection(block.source, &d, carve.dir, carve.contextBytes, seq, opts.logWriter()); err != nil {
+						opts.logf("[carve] warning: could not carve 'metamask-vault' at %s byte %d: %s\n",
 							d.Target, d.Offset, err.Error())
 					}
 				}
 				onDetection(d)
 			}
 		}
-		out <- block
+		select {
+		case <-ctx.Done():
+			return
+		case out <- block:
+		}
 	}
 }
