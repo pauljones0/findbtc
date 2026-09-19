@@ -28,8 +28,8 @@ completely solve the pain point?"**
 | 7 | Filesystem-aware layer | complete | a06a5c8 |
 | 8 | Forensics packaging | complete | a06a5c8 |
 | 9 | Fix install/distribution drift | complete | f5056bf |
-| 10 | CI Go-version matrix + static gates | active | - |
-| 11 | Hits JSON Schema | queued | - |
+| 10 | CI Go-version matrix + static gates | complete | cf4c69d |
+| 11 | Hits JSON Schema | active | - |
 | 12 | Partition-table parsing | queued | - |
 | 13 | Directory-tree scan mode | queued | - |
 | 14 | Refused image variants | queued | - |
@@ -301,11 +301,19 @@ wordlists). A green main today says nothing about the toolchain a user
 builds with, and no gate watches for vulnerable deps or static defects.
 
 **Completely solved when:**
-- [ ] CI tests current stable plus the previous minor Go release on all
+- [x] CI tests current stable plus the previous minor Go release on all
       three OSes, green.
-- [ ] Vulnerability scanning and a static analyzer run in CI and fail
+- [x] Vulnerability scanning and a static analyzer run in CI and fail
       the build on findings.
-- [ ] The documented minimum Go version matches the matrix result.
+- [x] The documented minimum Go version matches the matrix result.
+
+Evidence (Goal 10): branch run 35411949094 green on
+stable+oldstable × ubuntu/macos/windows plus the gates job
+(govulncheck binary mode clean, staticcheck clean). Negative controls:
+staticcheck flags the reintroduced SA5001 in scratch; govulncheck
+exits 3 on a scratch binary calling a vulnerable `x/net/html`
+symbol. Gates also fixed a real nil-Close bug
+(`detector/filesize_linux.go`) and two error-string findings.
 
 **Execute:**
 1. Draft the matrix edit + new gates on a branch; confirm green.
