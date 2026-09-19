@@ -115,6 +115,11 @@ The output validates against the NIST `dfxml_schema`
 `--reveal` input. `-report hits.jsonl` stays the human-readable
 triage summary.
 
+Stability note: the findbtc XML namespace
+(`.../jakewins/findbtc/ns/dfxml#`) deliberately keeps its original
+host even though the project moved — namespace identifiers must stay
+stable for existing DFXML consumers. It is frozen, not drift.
+
 ## 7. Carve with custody
 
 `-extract-dir` carves still write `hit-NNNNNN.bin` plus a JSON
