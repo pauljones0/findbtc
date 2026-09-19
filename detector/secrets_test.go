@@ -30,7 +30,6 @@ func TestSecretsRecall(t *testing.T) {
 		len   int
 	}{
 		{"pem", secretPEMcue, "pem-private-key", pemAt, len("-----BEGIN OPENSSH PRIVATE KEY-----")},
-		{"pem-rsa", "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n", "pem-private-key", 0, len("-----BEGIN RSA PRIVATE KEY-----")},
 		{"pem-pgp", "x-----BEGIN PGP PRIVATE KEY BLOCK-----y", "pem-private-key", 1, len("-----BEGIN PGP PRIVATE KEY BLOCK-----")},
 		{"aws", secretAWScue, "aws-access-key", awsAt, 20},
 		{"github", secretGHcue, "github-token", ghAt, 40},
@@ -47,10 +46,12 @@ func TestSecretsRecall(t *testing.T) {
 		}
 	}
 	// Near-misses stay silent: truncated bodies, wrong alphabets, and
-	// lookalike prefixes must not match.
+	// lookalike prefixes must not match. Since Goal 30, a DER-family
+	// header with a body that is not a DER SEQUENCE is a miss too.
 	misses := []string{
 		"-----BEGIN PUBLIC KEY-----\nAAAA\n",
 		"-----BEGIN RSA PUBLIC KEY-----\n",
+		"-----BEGIN RSA PRIVATE KEY-----\nAAAA\n",
 		"AKIAIOSFODNN7EXAMPL",    // 15-char body, one short
 		"AKIAiosfodnn7example00", // lowercase body
 		"ghp_short",

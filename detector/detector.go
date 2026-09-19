@@ -115,6 +115,11 @@ type Detection struct {
 	// "v1/<relpath>/<needle>/<line-hash>". Set only by -walk sweeps,
 	// which know the tree root; empty everywhere else.
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Verified reports that a DER-family PEM body base64-decoded and
+	// parsed as a DER SEQUENCE (Goal 30). Structural offline check
+	// only — it says the block is well-formed, never that the key
+	// works, and no live verification of any kind is performed.
+	Verified bool `json:"verified,omitempty"`
 }
 
 type ProgressInfo struct {
@@ -976,6 +981,7 @@ func detectWallets(ctx context.Context, in chan *Block, out chan *Block, onDetec
 						Target:      block.source.Describe(),
 						BlockOffset: block.offset + int64(block.overlap),
 						MatchLen:    int(m.endAbs - m.startAbs),
+						Verified:    m.verified,
 					}
 					if carve.dir != "" {
 						seq++

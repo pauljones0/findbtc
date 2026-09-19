@@ -94,6 +94,44 @@ deliberately.
 4. `github-token`: revoke it at github.com/settings/tokens, audit
    what it touched, and rotate anything it could reach.
 
+## Privacy audit: structural checks (Goal 30)
+
+DER-family PEM bodies (`PRIVATE KEY`, `RSA`/`DSA`/`EC PRIVATE KEY`,
+`ENCRYPTED PRIVATE KEY`) are validated offline: the body must
+base64-decode and parse as exactly one DER SEQUENCE or the header
+alone does not report. This audit states exactly what that touches:
+
+- **Bytes read:** the header line (matched literally), then body
+  lines up to the `END` line, the first non-base64 line, or the
+  caps (256 lines / 64KB). Bodies cut by the scan-window edge on a
+  non-final block report unverified rather than guessing.
+- **Bytes parsed:** the base64 alphabet check per line, then — on
+  the decoded buffer only — the SEQUENCE tag byte and the length
+  octets, with total length required to equal the buffer. No ASN.1
+  field is ever read: no INTEGERs, no key parameters, no
+  decryption of `ENCRYPTED` envelopes (the envelope parses; the
+  contents stay opaque).
+- **Bytes kept:** none by the matcher. The decoded buffer is a
+  function-local discarded after the boolean verdict. Match spans
+  cover the header line only; descriptions carry labels and
+  offsets only (enforced by the leak test in
+  `TestSecretsProfileEndToEnd`). The one exception is
+  user-directed: `-extract-dir` carves surrounding bytes to disk,
+  which is why every carve is treated as a live secret.
+- **No key handling:** non-test code imports no `crypto/rsa`,
+  `crypto/ecdsa`, `crypto/x509`, or `encoding/pem`
+  (`detector/secrets.go` imports `bytes`, `encoding/base64`, `fmt`
+  only). Test fixtures generate fresh random keys in-memory and
+  discard them.
+- **No network:** the only `net/http` uses are the opt-in
+  `-balance-endpoint` path (`-watch` balances, with its own loud
+  warning). The secrets matchers cannot dial out.
+
+OpenSSH and PGP blocks stay header-only (their bodies are not DER)
+and report at medium confidence; a `verified` hit is high. Either
+way `verified` means *well-formed*, never *working* — and it never
+means anyone checked the key against a live service.
+
 ## Non-goals
 
 - Private-key derivation is never attempted.

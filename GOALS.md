@@ -47,8 +47,8 @@ completely solve the pain point?"**
 | 26 | Salvage validation | complete | e13d569 |
 | 27 | Guided mode (-advise) | complete | 938d490 |
 | 28 | Embedding pass (quiet + cancel) | complete | e256cf6 |
-| 29 | Baseline/allowlist for repeat sweeps | complete | - |
-| 30 | Offline secret verification | queued | - |
+| 29 | Baseline/allowlist for repeat sweeps | complete | 1e36005 |
+| 30 | Offline secret verification | complete | - |
 
 ## Global done criteria (every goal)
 
@@ -824,10 +824,10 @@ excluded, leaving structural confidence as untouched territory and
 truncated/garbage bodies as unaddressed noise.
 
 **Completely solved when:**
-- [ ] PEM block bodies validate structurally (base64-decodes,
+- [x] PEM block bodies validate structurally (base64-decodes,
       parses as DER SEQUENCE); malformed bodies do not report, and
       per-hit confidence reflects the check.
-- [ ] Privacy audit notes exactly which bytes were touched: parsing
+- [x] Privacy audit notes exactly which bytes were touched: parsing
       alone — no derivation, no key handling, no network.
 
 **Execute:**

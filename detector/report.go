@@ -230,13 +230,19 @@ func Summarize(dets []Detection) Report {
 		}
 		seen[k] = true
 		c := classifyNeedle(d.Needle)
+		conf := c.confidence
+		if d.Needle == "pem-private-key" && !d.Verified {
+			// Header-only or window-cut: worth a look, not a
+			// validated block.
+			conf = "medium"
+		}
 		rep.Hits = append(rep.Hits, ReportHit{
 			Type:       c.walletType,
 			Needle:     d.Needle,
 			Target:     d.Target,
 			Offset:     d.Offset,
 			MatchLen:   d.MatchLen,
-			Confidence: c.confidence,
+			Confidence: conf,
 			Encrypted:  c.encrypted,
 			CarvePath:  d.CarvePath,
 			FileName:   d.FileName,

@@ -63,6 +63,10 @@
     "fingerprint": {
       "type": "string",
       "description": "Baseline key v1/<relpath>/<needle>/<line-hash>; present only on -walk sweeps, which know the tree root."
+    },
+    "verified": {
+      "type": "boolean",
+      "description": "True when a DER-family PEM body base64-decoded and parsed as a DER SEQUENCE. Structural offline check only: well-formed, not working; live verification is never performed."
     }
   },
   "$defs": {

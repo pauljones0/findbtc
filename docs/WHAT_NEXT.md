@@ -152,7 +152,8 @@ Needles like `pem-private-key`, `aws-access-key`, `github-token`
 
 **What it means:** a private key block or cloud credential. No
 coins directly — but on a shared or stolen machine these are the
-attacker's prize.
+attacker's prize. A `verified` key block only means it parses
+correctly — not that the key works or that anyone tested it live.
 
 **Next:** treat any carve as a live secret (encrypted storage,
 delete after) and rotate: private keys get replaced and purged
