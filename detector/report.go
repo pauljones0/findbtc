@@ -353,6 +353,7 @@ func (r Report) Text() string {
 	for i, s := range r.Playbook {
 		fmt.Fprintf(&b, "  %d. %s\n", i+1, s)
 	}
+	b.WriteString("New here? Start with docs/WHAT_NEXT.md — what each hit type means and what to do next.\n")
 	return b.String()
 }
 

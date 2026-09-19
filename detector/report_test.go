@@ -130,6 +130,13 @@ func TestSummarizeDedupesCountsAndOrders(t *testing.T) {
 	}
 }
 
+func TestReportPointsAtWhatsNext(t *testing.T) {
+	rep := Summarize([]Detection{reportFixtureDetection("bestblock", "/dev/sda", 10)})
+	if !strings.Contains(rep.Text(), "docs/WHAT_NEXT.md") {
+		t.Errorf("report text must point new owners at the what's-next guide:\n%s", rep.Text())
+	}
+}
+
 func TestSummarizeEmpty(t *testing.T) {
 	rep := Summarize(nil)
 	if rep.Total != 0 || rep.Unique != 0 || rep.Duplicates != 0 {

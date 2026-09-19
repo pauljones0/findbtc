@@ -99,6 +99,14 @@ counts with duplicates merged, per-hit confidence, encryption flags,
 byte-offset spans per target, and prioritized next steps. `-report -`
 reads from stdin; add `-json` for the machine-readable report. Like the
 scanner, the report prints type labels only — never key or seed material.
+If the hits are yours and you don't know what to do next, read
+[docs/WHAT_NEXT.md](docs/WHAT_NEXT.md) before anything else.
+
+> **SCAM SHIELD.** Fake "recovery services" target people who just
+> found wallet traces. Never send your wallet file, keys, seed words,
+> or password guesses to anyone — no legitimate tool or person needs
+> them. Never pay upfront for "guaranteed" recovery. Work on copies,
+> offline. Details in [docs/WHAT_NEXT.md](docs/WHAT_NEXT.md).
 
 ### Password recovery
 

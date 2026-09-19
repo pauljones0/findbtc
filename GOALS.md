@@ -29,18 +29,26 @@ completely solve the pain point?"**
 | 8 | Forensics packaging | complete | a06a5c8 |
 | 9 | Fix install/distribution drift | complete | f5056bf |
 | 10 | CI Go-version matrix + static gates | complete | cf4c69d |
-| 11 | Hits JSON Schema | active | - |
-| 12 | Partition-table parsing | queued | - |
-| 13 | Directory-tree scan mode | queued | - |
-| 14 | Refused image variants | queued | - |
-| 15 | Benchmarks + throughput | queued | - |
-| 16 | Hostile-image resource audit | queued | - |
-| 17 | Checkpoint/resume for range scans | queued | - |
-| 18 | OS packages via nFPM | queued | - |
-| 19 | Library API pass | queued | - |
-| 20 | Opt-in secret profiles | queued | - |
-| 21 | Container image | queued | - |
-| 22 | Pipeline ingest evaluation | queued | - |
+| 11 | Hits JSON Schema | complete | 8b3f8c1 |
+| 12 | Partition-table parsing | complete | 396da5d |
+| 13 | Directory-tree scan mode | complete | 91e1a74 |
+| 14 | Refused image variants | complete | f6c56b3 |
+| 15 | Benchmarks + throughput | complete | 1555e57 |
+| 16 | Hostile-image resource audit | complete | f699568 |
+| 17 | Checkpoint/resume for range scans | complete | e5b7854 |
+| 18 | OS packages via nFPM | complete | 204947d |
+| 19 | Library API pass | complete | c87fa0d |
+| 20 | Opt-in secret profiles | complete | cbf95d4 |
+| 21 | Container image | complete | 97ef967 |
+| 22 | Pipeline ingest evaluation | complete | 2525e43 |
+| 23 | Owner "what's next" guide + anti-scam shield | complete | - |
+| 24 | Exit-on-hit + CI gating | active | - |
+| 25 | FAT/exFAT filesystem support | queued | - |
+| 26 | Salvage validation | queued | - |
+| 27 | Guided mode (-advise) | queued | - |
+| 28 | Embedding pass (quiet + cancel) | queued | - |
+| 29 | Baseline/allowlist for repeat sweeps | queued | - |
+| 30 | Offline secret verification | queued | - |
 
 ## Global done criteria (every goal)
 
@@ -613,6 +621,226 @@ invisible and unactionable.
 
 **Verify:** asks documented; prototype validated or rationale written;
 gates.
+
+## Goal 23 — Owner "what's next" guide + anti-scam shield
+
+**Pain to completely solve:** a non-technical owner finds traces and
+is stuck — a `bestblock` hit means nothing to them, the next steps
+are scattered across per-feature runbooks, and the ecosystem waiting
+for them is scam recovery services that ask for exactly the secrets
+that must never be shared. The tool finds; nothing guides or shields.
+
+**Completely solved when:**
+- [x] `docs/WHAT_NEXT.md` answers "I found traces, what's next?" in
+      plain language keyed by hit type (marker vs key vs seed vs
+      encrypted vs secrets-profile hit): what it means, exact next
+      commands, and when to stop — linked from `-report` output and
+      the README triage section.
+- [x] A loud anti-scam box (never send wallet/keys/seed to anyone;
+      no legitimate tool needs them; work on copies, offline) ships
+      in the guide and README, and a non-technical second reader
+      reaches the right next action for 5 sample hits without asking
+      questions.
+
+**Execute:**
+1. Draft the guide against the 5 most common hit types; verify every
+   command verbatim.
+2. Add the `-report`/README pointers.
+3. Second-reader test with a non-technical reader; fix what confuses.
+
+**Non-goals:** new detectors; automated fix-it flows; endorsing any
+recovery service.
+
+**Verify:** reader test passes; every command executed verbatim;
+gates.
+
+## Goal 24 — Exit-on-hit + CI gating
+
+**Pain to completely solve:** exit code is 0 whether or not anything
+matched, so secret hygiene cannot gate CI or pre-commit hooks — the
+core workflow of the secrets audience — without wrapper scripting.
+
+**Completely solved when:**
+- [x] An opt-in `-fail-on-hit` flag makes scan/`-walk`/`-report`
+      exit with a distinct documented code (not 0/1/2) on actionable
+      hits; default exit behavior is byte-identical (existing suite
+      + probes prove it).
+- [x] A sample pre-commit hook + GH workflow using the flag passes
+      on a clean fixture repo and fails on a planted secret.
+
+**Execute:**
+1. Add the flag with the exit-code contract documented in README.
+2. Sample hook + workflow fixtures; clean/planted matrix test.
+3. Dogfood consideration: repo self-sweep in CI (expect the
+   allowlist question — that is Goal 29, not this one).
+
+**Non-goals:** changing default exit behavior; baselines/allowlists;
+severity thresholds (hits are hits).
+
+**Verify:** clean/planted matrix green; default-behavior probes
+unchanged; gates.
+
+## Goal 25 — FAT/exFAT filesystem support
+
+**Pain to completely solve:** `-fs` covers NTFS/ext only, but USB
+sticks, SD cards, and old externals — exactly where owners keep
+wallet backups — are FAT32/exFAT. Every "wallet on a USB stick"
+case falls back to filename-less raw carving with PhotoRec's known
+weaknesses (fragmentation, no names, live/deleted conflation).
+
+**Completely solved when:**
+- [ ] FAT12/16/32 + exFAT volumes inventory live and deleted entries
+      with names behind the existing volume interface, auto-seed
+      through the partition table, and stamp `file=` on hits like
+      NTFS/ext.
+- [ ] Same FP bar per format (silence on random + prose, enforced by
+      tests); recovered entries cross-checked against Sleuth Kit
+      `fls`/`icat` on fixtures.
+
+**Execute:**
+1. Build FAT32 + exFAT fixtures with deleted files (long names,
+   fragmented files, exFAT bitmaps).
+2. Spike the reader (FAT chains + directory entries); cross-check
+   against `fls`/`icat`.
+3. Wire auto-seed + `file=` stamping + docs; timebox the spike —
+   FAT looks small until long filenames + exFAT bitmaps.
+
+**Non-goals:** APFS (still demand-gated); repairing filesystems;
+changing raw-scan behavior.
+
+**Verify:** oracle cross-checks green; FP bar tests; gates.
+
+## Goal 26 — Salvage validation
+
+**Pain to completely solve:** salvage writes `.salvage.db` with no
+open-check, so a corrupt rebuild fails mysteriously at the next
+step — after the user has built hope on it. SQLite order is already
+documented-uncertain except for page-1-led runs.
+
+**Completely solved when:**
+- [ ] Every salvaged run carries a valid/suspect verdict from
+      structural validation (SQLite header, page-size, btree cell
+      bounds; BDB page headers + pgno sequence), surfaced in the
+      sidecar and `-report`.
+- [ ] Validator verdicts match real `sqlite3`/`db_verify` open-checks
+      on the fixture set (independent oracles).
+
+**Execute:**
+1. Run existing salvaged fixtures through `sqlite3`/`db_verify`;
+   catalog which structural checks predict "opens".
+2. Implement the validator dependency-free (no sqlite driver —
+   structural checks only); wire verdicts into sidecar + report.
+3. Docs: what valid/suspect means and what to do for each.
+
+**Non-goals:** repairing corrupt databases; new database formats;
+changing salvage assembly itself.
+
+**Verify:** oracle agreement on fixtures; verdicts in sidecar +
+report; gates.
+
+## Goal 27 — Guided mode (-advise)
+
+**Pain to completely solve:** 9 modes × ~25 flags and nothing helps
+a new user pick one — raw vs `-fs` vs `-walk` vs `-unallocated-only`
+is a real decision tree, and each mode fails well only after the
+user guessed wrong.
+
+**Completely solved when:**
+- [ ] `-advise TARGET` inspects the target (partitioned? filesystem?
+      directory? size?) and prints the recommended command with
+      reasons. It never scans and never auto-runs — pure routing.
+- [ ] Four fixtures (raw file, partitioned disk, ext image,
+      directory) route to the documented-best command, proven by
+      test.
+
+**Execute:**
+1. Define the routing table (target shape → command + reasons).
+2. Implement inspection + printer; route tests on fixtures.
+3. README/docs pointer; usage-line mention.
+
+**Non-goals:** auto-running scans; interactive wizards; changing any
+mode's behavior.
+
+**Verify:** routing tests green; gates.
+
+## Goal 28 — Embedding pass (quiet + cancel)
+
+**Pain to completely solve:** library users get unconditional stderr
+spam (Goal 19's documented wart, hit by the second reader) and no
+cancellation — a server embedding a long scan can neither route logs
+nor enforce a deadline.
+
+**Completely solved when:**
+- [ ] `Options.Log io.Writer` routes all library diagnostics (nil =
+      stderr, default output byte-identical, proven by test).
+- [ ] `Options.Context` (nil = Background) cancels a scan promptly
+      with documented semantics (partial results, checkpoint left
+      behind, no goroutine leaks — tested).
+
+**Execute:**
+1. Enumerate every library stderr write; route through one writer.
+2. Thread the context from `runPipeline` through the stages.
+3. Doc updates (`doc.go` tiers/warts) + leak/cancel tests.
+
+**Non-goals:** changing CLI default output by one byte; progress
+throttling; new callbacks.
+
+**Verify:** byte-identity test on default output; cancel promptness
++ leak tests; gates.
+
+## Goal 29 — Baseline/allowlist for repeat sweeps
+
+**Pain to completely solve:** every `-walk` re-reports known
+fixtures and accepted findings, so repo secret hygiene is one-shot —
+gitleaks' answer (baselines + allowlists) has no counterpart here,
+and Goal 24's dogfood step will hit this wall immediately.
+
+**Completely solved when:**
+- [ ] `-baseline hits.jsonl` suppresses known findings across repeat
+      sweeps while new hits still report, with documented drift
+      behavior (fingerprint must survive file edits — raw offsets
+      do not).
+- [ ] Fingerprint stability proven across edit patterns (append,
+      insert-above, rewrite) by test.
+
+**Execute:**
+1. Design spike: fingerprint candidates (e.g. relpath + needle +
+   line-hash for walk mode); measure stability across edits.
+2. Implement baseline load/match/suppress; report counts of
+   suppressed vs new.
+3. Docs: baseline workflow for repos + CI.
+
+**Non-goals:** auto-updating baselines; fuzzy matching; changing
+detection itself.
+
+**Verify:** stability tests; suppressed/new counts; gates.
+
+## Goal 30 — Offline secret verification
+
+**Pain to completely solve:** the secrets profile reports shapes,
+and the market's whole FP answer is verification
+(TruffleHog `--only-verified`) — but live verification stays
+excluded, leaving structural confidence as untouched territory and
+truncated/garbage bodies as unaddressed noise.
+
+**Completely solved when:**
+- [ ] PEM block bodies validate structurally (base64-decodes,
+      parses as DER SEQUENCE); malformed bodies do not report, and
+      per-hit confidence reflects the check.
+- [ ] Privacy audit notes exactly which bytes were touched: parsing
+      alone — no derivation, no key handling, no network.
+
+**Execute:**
+1. Measure current behavior on truncation fixtures + noise corpus.
+2. Implement structural validation in the PEM matcher; confidence
+   in output/report.
+3. Privacy audit + docs; FP bar tests.
+
+**Non-goals:** live verification of any kind (standing exclusion);
+new secret types; entropy-scored generic matchers.
+
+**Verify:** truncation fixtures rejected; corpus silent; audit
+written; gates.
 
 ## Commit policy
 
