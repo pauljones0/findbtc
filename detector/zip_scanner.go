@@ -77,13 +77,29 @@ func (t *zipScanTarget) Open() (TargetReader, error) {
 	}
 	defer reader.Close()
 
-	data, err := io.ReadAll(reader)
-
+	// The declared size was already checked at publish; re-check actual
+	// bytes because hostile headers lie (a zip bomb declares small).
+	// archive/zip also enforces declared sizes on read, so this is
+	// belt-and-braces here — and load-bearing wherever raw flate is
+	// inflated (see zip_recover.go).
+	data, err := inflateCapped(reader, maxZipMemberBytes, "zip member")
 	if err != nil {
 		return nil, err
 	}
 
 	return &closableBytesReader{bytes.NewReader(data)}, nil
+}
+
+// inflateCapped reads r fully, failing if it yields more than cap bytes.
+func inflateCapped(r io.Reader, cap int64, what string) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, cap+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > cap {
+		return nil, fmt.Errorf("%s inflates past %d bytes", what, cap)
+	}
+	return data, nil
 }
 
 type offsetReaderAt struct {
@@ -205,7 +221,7 @@ func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTarge
 	// Publish each file inside the compressed archive as a new scan target
 	newScanTargets := 0
 	for fileIndex, fileInfo := range reader.File {
-		if fileInfo.UncompressedSize64 > maxZipMemberBytes {
+		if fileInfo.UncompressedSize64 > uint64(maxZipMemberBytes) {
 			fmt.Fprintf(os.Stderr, "[scan] Skipping %d-byte member %q: over the %d-byte inflation cap\n",
 				fileInfo.UncompressedSize64, fileInfo.Name, maxZipMemberBytes)
 			continue

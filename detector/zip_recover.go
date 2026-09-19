@@ -190,12 +190,12 @@ func (t *zipEntryTarget) Open() (TargetReader, error) {
 	defer f.Close()
 	fr := flate.NewReader(io.NewSectionReader(f, t.dataOff, t.compSize))
 	defer fr.Close()
-	data, err := io.ReadAll(io.LimitReader(fr, maxZipMemberBytes+1))
+	// Raw flate has no declared-size enforcement (unlike archive/zip),
+	// so this cap is the only thing standing between a lying local
+	// header and unbounded inflation.
+	data, err := inflateCapped(fr, maxZipMemberBytes, "entry")
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(data)) > maxZipMemberBytes {
-		return nil, fmt.Errorf("entry inflates past %d bytes", maxZipMemberBytes)
 	}
 	return &closableBytesReader{bytes.NewReader(data)}, nil
 }

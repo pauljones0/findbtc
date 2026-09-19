@@ -459,10 +459,10 @@ zip member, unbounded E01 chunk-table trust, depth cap 8. A malicious or
 pathological image could exhaust RAM or time with no documented bound.
 
 **Completely solved when:**
-- [ ] Parsers (zip bombs, E01 table lies, gzip streams) are threat-
+- [x] Parsers (zip bombs, E01 table lies, gzip streams) are threat-
       modeled and worst-case fixtures assert documented time/RAM bounds
       in CI (generous margins, no flakes).
-- [ ] Every bound is documented next to the constant that enforces it.
+- [x] Every bound is documented next to the constant that enforces it.
 
 **Execute:**
 1. Craft a 1 GiB-claim zip and an E01 with maximal chunk table.

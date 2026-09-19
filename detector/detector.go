@@ -145,10 +145,16 @@ type scanTarget interface {
 // Resource limits against hostile or pathological archives.
 const (
 	// maxArchiveDepth caps nested archive traversal (zip-in-gzip-in-...).
+	// Worst case per level is bounded by the member/chunk caps below, so
+	// total archive RAM stays near depth × the largest single inflation.
 	maxArchiveDepth = 8
-	// maxZipMemberBytes caps the in-memory inflation of one zip member.
-	maxZipMemberBytes = 1 << 30
 )
+
+// maxZipMemberBytes caps the in-memory inflation of one zip member: the
+// publish check skips honestly-declared giants, and member Open re-checks
+// actual inflated bytes so a lying declared size cannot bypass it. A var
+// (not const) so hostile-input tests can lower it without allocating 1 GiB.
+var maxZipMemberBytes = int64(1 << 30)
 
 type fileScanTarget struct {
 	path        string
@@ -308,6 +314,10 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 
 	signals := make(chan error, 10)
 
+	// scanTargets buffers pending nested-archive targets (1M slots ≈
+	// 16 MiB of pointers); past that, publishers block rather than grow
+	// memory. Depth (maxArchiveDepth) plus per-member caps bound what a
+	// hostile archive can queue behind it.
 	scanTargets := make(chan scanTarget, 1024*1024)
 
 	emptyBlocks := make(chan *Block, 30)

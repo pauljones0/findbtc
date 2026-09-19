@@ -34,8 +34,13 @@ const (
 	ewfSmartVolumeLen = 94
 	ewfHashLen        = 36
 	ewfTableHeadLen   = 24
-	ewfMaxSegments    = 99
-	ewfMaxChunkBytes  = 64 << 20
+	// ewfMaxSegments caps the segment set (.E01-.E99): the extension
+	// scheme itself ends there, so longer sets are corrupt, not bigger.
+	ewfMaxSegments = 99
+	// ewfMaxChunkBytes caps one decoded chunk (64 MiB): chunk inflation
+	// is limited to this +1 byte, so a hostile chunk cannot decode
+	// gigabytes before the length check sees it.
+	ewfMaxChunkBytes = 64 << 20
 )
 
 // ewfSmartMarker sits at volume[85:90] in SMART (S01) volume sections.
@@ -112,8 +117,11 @@ type ewfLayout struct {
 	chunks     []ewfChunk
 	chunkBytes int64
 	mediaSize  int64
-	md5        [16]byte
-	hasMD5     bool
+	// volumeChunks is the volume-declared chunk count; tables claiming
+	// more are lies (checked in parseTable once the volume is seen).
+	volumeChunks int64
+	md5          [16]byte
+	hasMD5       bool
 }
 
 // openEWFLayout parses every segment of the set containing firstPath.
@@ -194,6 +202,11 @@ func ewfSegmentNumber(path string) (int, string, error) {
 
 // parseSegment walks one segment file, appending its chunks to the layout.
 // It reports whether the segment ends with a "next" section (set continues).
+// Resource note: the whole segment is held in RAM during eager parse, so
+// peak EWF memory is ~the largest segment file plus one decoded chunk
+// (ewfMaxChunkBytes). Segment sizes are capped only by the format's own
+// sanity (sections must chain within the file); refusing large honest
+// segments is not an option, so this stays documented, not limited.
 func (l *ewfLayout) parseSegment(path string, segNum int, volumeSeen *bool) (bool, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -300,6 +313,7 @@ func (l *ewfLayout) parseVolume(path string, data []byte) error {
 	spc := binary.LittleEndian.Uint32(data[8:12])
 	bps := binary.LittleEndian.Uint32(data[12:16])
 	sectors := binary.LittleEndian.Uint64(data[16:24])
+	l.volumeChunks = int64(chunks)
 	switch bps {
 	case 512, 1024, 2048, 4096:
 	default:
@@ -332,6 +346,10 @@ func (l *ewfLayout) parseTable(path string, segNum int, data []byte, off int64, 
 	base := int64(binary.LittleEndian.Uint64(data[8:16]))
 	if adler32.Checksum(data[:20]) != binary.LittleEndian.Uint32(data[20:24]) {
 		return fmt.Errorf("ewf: %s: table header checksum mismatch", path)
+	}
+	if l.volumeChunks > 0 && int64(len(l.chunks))+int64(n) > l.volumeChunks {
+		return fmt.Errorf("ewf: %s: table claims %d chunks, volume declares %d total",
+			path, n, l.volumeChunks)
 	}
 	smart := sectorsDesc < 0
 	if smart && l.flavor != "smart" {
@@ -525,7 +543,9 @@ func (r *ewfReader) chunk(idx int64) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ewf: chunk %d: bad compressed data: %w", idx, err)
 		}
-		decoded, err = io.ReadAll(zr)
+		// Cap the inflation: a hostile chunk could otherwise decode
+		// gigabytes before the length check below sees it.
+		decoded, err = io.ReadAll(io.LimitReader(zr, r.layout.chunkBytes+1))
 		zr.Close()
 		if err != nil {
 			return nil, fmt.Errorf("ewf: chunk %d: decompression failed: %w", idx, err)

@@ -32,6 +32,26 @@ type ewfBuildOpt struct {
 	sectorsPerChunk uint32
 	compress        func(chunk int) bool // default: all compressed
 	chunksPerSeg    int                  // 0: single segment
+	// poisonExtra, when > 0, replaces chunk 0's plaintext with
+	// chunkBytes+poisonExtra zero bytes (a hostile over-inflating chunk).
+	poisonExtra int
+}
+
+// ewfPoisonChunk rewrites stored[0] with an over-long plaintext for
+// chunk-bomb tests; geometry/checksums recompute downstream.
+func ewfPoisonChunk(t ewfTB, stored [][]byte, flags []bool, chunkBytes, extra int) {
+	t.Helper()
+	big := make([]byte, chunkBytes+extra)
+	var buf bytes.Buffer
+	w := zlib.NewWriter(&buf)
+	if _, err := w.Write(big); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	stored[0] = buf.Bytes()
+	flags[0] = true
 }
 
 // ewfEncodeChunks zlib-compresses or stores every chunk per comp, the
@@ -81,6 +101,9 @@ func buildEWF(t ewfTB, dir, name string, raw []byte, opt ewfBuildOpt) string {
 	nch := (len(raw) + chunkBytes - 1) / chunkBytes
 	nsec := (len(raw) + bps - 1) / bps
 	stored, flags := ewfEncodeChunks(t, raw, chunkBytes, opt.compress)
+	if opt.poisonExtra > 0 {
+		ewfPoisonChunk(t, stored, flags, chunkBytes, opt.poisonExtra)
+	}
 	var groups [][]int
 	if opt.chunksPerSeg > 0 {
 		for i := 0; i < nch; i += opt.chunksPerSeg {
