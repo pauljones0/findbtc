@@ -9,12 +9,13 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        go-version: [stable, oldstable]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version: ${{ matrix.go-version }}
       - name: gofmt
         shell: bash
         run: test -z "$(gofmt -l .)"
@@ -30,3 +31,22 @@ jobs:
           for f in FuzzBIP39 FuzzKeys FuzzKeystore FuzzBase58 FuzzZipLocalHeader; do
             go test ./detector/ -run NONE -fuzz "^$f\$" -fuzztime 15s
           done
+
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      # Binary mode scans what ships. Source mode is avoided: govulncheck
+      # v1.1.4 panics building SSA over current stable's stdlib sources
+      # (x/tools too old); revisit source mode on the next x/vuln pin.
+      - name: govulncheck
+        run: |
+          go build -o /tmp/findbtc-gate .
+          go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 -mode=binary /tmp/findbtc-gate
+      - name: staticcheck
+        run: |
+          (cd /tmp && curl -sL -O 'https://github.com/dominikh/go-tools/releases/download/2026.2.1/staticcheck_linux_amd64.tar.gz' && curl -sL -O 'https://github.com/dominikh/go-tools/releases/download/2026.2.1/staticcheck_linux_amd64.tar.gz.sha256' && sha256sum -c staticcheck_linux_amd64.tar.gz.sha256 && tar xzf staticcheck_linux_amd64.tar.gz)
+          /tmp/staticcheck/staticcheck ./...

@@ -21,6 +21,9 @@ func FileSize(path string) (int64, error) {
 
 	// 2. Ok, assume we've got a block device then, need to use ioctl to get device size
 	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
 	defer f.Close()
 
 	size := int64(0)

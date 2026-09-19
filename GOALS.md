@@ -27,7 +27,7 @@ completely solve the pain point?"**
 | 6 | More wallet formats by demand | complete | a06a5c8 |
 | 7 | Filesystem-aware layer | complete | a06a5c8 |
 | 8 | Forensics packaging | complete | a06a5c8 |
-| 9 | Fix install/distribution drift | complete | (uncommitted — awaiting user's commit) |
+| 9 | Fix install/distribution drift | complete | f5056bf |
 | 10 | CI Go-version matrix + static gates | active | - |
 | 11 | Hits JSON Schema | queued | - |
 | 12 | Partition-table parsing | queued | - |

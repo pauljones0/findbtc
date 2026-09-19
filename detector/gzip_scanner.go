@@ -56,7 +56,7 @@ type gzipTargetReader struct {
 }
 
 func (r *gzipTargetReader) ReadAt(p []byte, off int64) (n int, err error) {
-	return -1, fmt.Errorf("Indexed reads of gzip files not yet implemented")
+	return -1, fmt.Errorf("indexed reads of gzip files not yet implemented")
 }
 func (r *gzipTargetReader) Read(p []byte) (n int, err error) {
 	return r.r.Read(p)
@@ -65,7 +65,7 @@ func (r *gzipTargetReader) Seek(offset int64, whence int) (int64, error) {
 	if offset == 0 {
 		return 0, nil
 	}
-	return 0, fmt.Errorf("Seeking not implemented for gzip files")
+	return 0, fmt.Errorf("seeking not implemented for gzip files")
 }
 func (r *gzipTargetReader) Close() error {
 	defer r.fc.Close()
