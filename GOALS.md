@@ -599,7 +599,7 @@ if real cases need another interchange, that demand is currently
 invisible and unactionable.
 
 **Completely solved when:**
-- [ ] Three concrete toolchain asks are collected (user interviews or
+- [x] Three concrete toolchain asks are collected (user interviews or
       issues) and one cheapest-format prototype is validated against a
       sample toolchain — or the evaluation concludes DFXML-only with
       written rationale. No exporter ships without demonstrated demand.
