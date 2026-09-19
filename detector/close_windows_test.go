@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jakewins/findbtc/detector"
+	"github.com/pauljones0/findbtc/detector"
 )
 
 // After Scan returns, the source file must already be closed: Windows

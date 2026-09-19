@@ -41,9 +41,9 @@ homebrew_casks:
   - name: findbtc
     skip_upload: true
     repository:
-      owner: jakewins
+      owner: pauljones0
       name: homebrew-findbtc
-    homepage: https://github.com/jakewins/findbtc
+    homepage: https://github.com/pauljones0/findbtc
     description: Find BTC wallets by scanning raw block devices
     license: GPL-3.0-or-later
     binaries:

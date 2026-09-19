@@ -3,12 +3,24 @@ package main
 import (
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jakewins/findbtc/detector"
+	"github.com/pauljones0/findbtc/detector"
 )
+
+// The module path is the SBOM identity and the go install address: pin it.
+func TestModulePath(t *testing.T) {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		t.Fatal("no build info available")
+	}
+	if want := "github.com/pauljones0/findbtc"; info.Main.Path != want {
+		t.Fatalf("module path = %q, want %q", info.Main.Path, want)
+	}
+}
 
 func TestFormatETA(t *testing.T) {
 	for in, want := range map[time.Duration]string{

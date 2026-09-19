@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jakewins/findbtc/detector"
+	"github.com/pauljones0/findbtc/detector"
 )
 
 // version is stamped by GoReleaser; dev builds report "dev".

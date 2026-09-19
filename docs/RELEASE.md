@@ -29,7 +29,7 @@ Each platform archive (`findbtc_<version>_<os>_<arch>.tar.gz`,
    support) against the archive you will run:
 
        gh attestation verify findbtc_*_linux_amd64.tar.gz \
-         --repo github.com/jakewins/findbtc
+         --repo github.com/pauljones0/findbtc
 
    A passing report binds the archive to the exact repository commit
    and workflow run that produced the release. Repeat for the
@@ -41,7 +41,7 @@ Each platform archive (`findbtc_<version>_<os>_<arch>.tar.gz`,
           for p in json.load(open(sys.argv[1]))['packages']]" \
          findbtc_*_linux_amd64.tar.gz.sbom.json
 
-   Expect `github.com/jakewins/findbtc` at the release commit,
+   Expect `github.com/pauljones0/findbtc` at the release commit,
    `golang.org/x/sys`, and the Go toolchain — nothing else fetches
    code at build time.
 
@@ -64,8 +64,8 @@ findbtc is GPL-3.0-or-later; `LICENSE` ships inside every archive.
 When you redistribute a release — to a lab machine, a case share,
 or a customer — include the archive, its `.sbom.json`, and
 `checksums.txt` together so the recipient can repeat the checks
-above. The Homebrew cask (`jakewins/homebrew-findbtc`) tracks
-releases for macOS installs.
+above. No Homebrew tap is published yet; macOS users should install
+from the release archives.
 
 Snapshot builds (version `*-SNAPSHOT-*`) are CI/dev artifacts, never
 published to releases; treat them as untrusted for casework.

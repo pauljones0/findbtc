@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jakewins/findbtc/detector"
+	"github.com/pauljones0/findbtc/detector"
 )
 
 // Ground truth for test_wallet.dat (90112 bytes), verified with grep -boa:

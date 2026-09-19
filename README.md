@@ -27,22 +27,22 @@ types are ever printed; the secrets themselves stay out of logs and output.
 ## Installing
 
 Download a ready-made binary for linux, macOS or Windows (x86-64 and ARM64)
-from the [releases page](https://github.com/jakewins/findbtc/releases), then
+from the [releases page](https://github.com/pauljones0/findbtc/releases), then
 verify its checksum:
 
     sha256sum -c checksums.txt
 
 Release artifacts also carry Sigstore build-provenance attestations, verifiable
-with `gh attestation verify`. On macOS and Linux with Homebrew:
-
-    brew tap jakewins/findbtc
-    brew install --cask findbtc
+with `gh attestation verify` (see [docs/RELEASE.md](docs/RELEASE.md)). There
+is no Homebrew tap yet, so macOS users should install from the release
+archives.
 
 Since this is potentially sensitive software, you are encouraged to build it
-from source instead. That requires Go 1.24 or later, see
-https://golang.org/doc/install
+from source instead. That requires a recent Go toolchain, see
+https://golang.org/doc/install — CI covers the latest two stable
+releases, and `go.mod` floors the language version at 1.24.
 
-    go install github.com/jakewins/findbtc@latest
+    go install github.com/pauljones0/findbtc@latest
     sudo findbtc /dev/sda
 
 
