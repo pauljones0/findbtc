@@ -121,7 +121,8 @@ func TestWalkUnreadableIsolated(t *testing.T) {
 	if len(dets) == 0 {
 		t.Error("readable file was not scanned alongside the unreadable one")
 	}
-	if _, err := os.Open(bad); err == nil {
+	if f, err := os.Open(bad); err == nil {
+		f.Close() // probe handle must close: on Windows it blocks TempDir cleanup
 		t.Log("platform reads chmod-000 files (Windows/root); isolation still held")
 		return
 	}
