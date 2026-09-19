@@ -111,6 +111,10 @@ type Detection struct {
 	// Salvage describes reassembled database pages from the carve; set only
 	// when salvage wrote a .salvage.db file.
 	Salvage *SalvageInfo `json:"salvage,omitempty"`
+	// Fingerprint keys the finding for baseline suppression (Goal 29):
+	// "v1/<relpath>/<needle>/<line-hash>". Set only by -walk sweeps,
+	// which know the tree root; empty everywhere else.
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 type ProgressInfo struct {

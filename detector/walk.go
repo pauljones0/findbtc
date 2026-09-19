@@ -34,6 +34,12 @@ type WalkOptions struct {
 	// FollowSymlinks scans through symlinked files and descends into
 	// symlinked directories. Off by default; loops fail safe per link.
 	FollowSymlinks bool
+	// Baseline, when non-nil, suppresses findings whose Fingerprint
+	// was recorded in a reviewed earlier sweep (see
+	// LoadBaselineFingerprints): known hits stay silent while new
+	// hits report. Suppressed counts land in
+	// WalkStats.SuppressedBaseline, never in the detection stream.
+	Baseline map[string]bool
 }
 
 // WalkFailure records one path the sweep could not handle.
@@ -56,6 +62,9 @@ type WalkStats struct {
 	// Failed holds the first failures (capped); FailedTotal counts all.
 	Failed      []WalkFailure
 	FailedTotal int64
+	// SuppressedBaseline counts findings silenced by the baseline
+	// (known hits from an earlier reviewed sweep).
+	SuppressedBaseline int64
 }
 
 // maxWalkFailures caps retained failure detail; the count is unbounded.
@@ -100,21 +109,21 @@ func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgres
 	}
 	carvePrefix, caseLog := ownOutputPaths(wopts.Scan)
 	seqBase := wopts.Scan.CarveSeqStart
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return stats, fmt.Errorf("cannot resolve %s: %w", root, err)
+	}
 	w := &walker{
 		wopts: wopts, stats: &stats,
 		carvePrefix: carvePrefix, caseLog: caseLog,
 		onDetection: onDetection, onProgress: onProgress,
-		seqBase: &seqBase,
+		seqBase: &seqBase, root: abs,
 	}
 	if !info.IsDir() {
 		if err := w.scanFile(root); err != nil {
 			return stats, err
 		}
 		return stats, nil
-	}
-	abs, err := filepath.Abs(root)
-	if err != nil {
-		return stats, fmt.Errorf("cannot resolve %s: %w", root, err)
 	}
 	if wopts.FollowSymlinks {
 		// Evaluated anchor for cycle detection.
@@ -123,6 +132,7 @@ func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgres
 		}
 		w.visited = map[string]bool{abs: true}
 	}
+	w.root = abs
 	if err := w.recurse(abs, 0); err != nil {
 		return stats, err
 	}
@@ -153,6 +163,7 @@ type walker struct {
 	carvePrefix string
 	caseLog     string
 	seqBase     *int
+	root        string // anchored sweep root for fingerprint relpaths
 	// visited holds evaluated dir paths in follow mode for cycle checks.
 	visited map[string]bool
 }
@@ -182,6 +193,20 @@ func (w *walker) scanFile(path string) error {
 	fileOpts.CarveSeqStart = *w.seqBase
 	var n int
 	err := ScanWithOptions(0, path, fileOpts, func(d Detection) {
+		// Every walk detection carries its baseline key (a future
+		// reviewed sweep becomes the suppress-list); matching
+		// suppresses known hits while new ones report. The root is
+		// absolute, so absolutize a relative scan path for the
+		// relpath — display paths stay as walked.
+		abs, aerr := filepath.Abs(path)
+		if aerr != nil {
+			abs = path
+		}
+		d.Fingerprint = FingerprintFinding(w.root, abs, d.Needle, d.Offset, d.MatchLen)
+		if w.wopts.Baseline != nil && d.Fingerprint != "" && w.wopts.Baseline[d.Fingerprint] {
+			w.stats.SuppressedBaseline++
+			return
+		}
 		n++
 		w.onDetection(d)
 	}, w.onProgress)

@@ -52,8 +52,35 @@ in `samples/`:
   container image.
 
 Both run `-walk -profile=secrets -fail-on-hit`, so local and CI
-gates agree by construction. (Repeat sweeps re-report accepted
-findings until baselines land — see GOALS.md Goal 29.)
+gates agree by construction.
+
+## Baselines for repeat sweeps
+
+Accepted findings (reviewed false alarms, fixture secrets) would
+otherwise fail every future gate. Record them once, then suppress by
+fingerprint:
+
+    findbtc -walk ~/src -profile=secrets -json > sweep.jsonl
+    # review sweep.jsonl, then keep the accepted hits as the baseline:
+    findbtc -walk ~/src -profile=secrets -fail-on-hit -baseline sweep.jsonl
+
+Add the same `-baseline known.jsonl` to the pre-commit hook and the
+CI workflow so local and remote gates agree. The sweep reports
+`N suppressed by baseline` on stderr; suppressed hits never reach
+stdout and never trip `-fail-on-hit`.
+
+Each finding is keyed by repository path + needle + a hash of the
+full line holding the match — never raw offsets, which edits move.
+Appending lines, inserting lines above a hit, and rewriting the file
+around it all keep the key stable, so accepted hits stay silent.
+Changing the line (rotating a secret), adding a same-type secret
+elsewhere in the file, or converting line endings changes the key,
+so the finding reports again: when in doubt the baseline re-reports
+rather than swallows. Baselines store hashes, not secret bytes, but
+a low-entropy line stays guessable from its hash — keep baseline
+files with the swept tree, not in a public place. There is no fuzzy
+matching and baselines never auto-update: re-review and re-record
+deliberately.
 
 ## Responding to hits
 

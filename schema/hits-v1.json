@@ -59,6 +59,10 @@
     "salvage": {
       "$ref": "#/$defs/salvageInfo",
       "description": "Reassembled database pages from the carve; present only when salvage wrote a .salvage.db file."
+    },
+    "fingerprint": {
+      "type": "string",
+      "description": "Baseline key v1/<relpath>/<needle>/<line-hash>; present only on -walk sweeps, which know the tree root."
     }
   },
   "$defs": {

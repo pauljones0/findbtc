@@ -49,6 +49,7 @@ func main() {
 	dfxmlPath := flag.String("dfxml", "", "Convert a -json hits file (or - for stdin) to DFXML on stdout instead of scanning")
 	verifyLogPath := flag.String("verify-case-log", "", "Re-hash the sources behind each record in case-log FILE and report match/mismatch instead of scanning")
 	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)")
+	baselinePath := flag.String("baseline", "", "Suppress -walk findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)")
 	hashesPath := flag.String("hashes", "", "Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning")
 	salvagePath := flag.String("salvage", "", "Analyze FILE for salvageable database pages instead of scanning")
 	salvageOut := flag.String("salvage-out", "", "Write the salvaged database image to PATH (only with -salvage)")
@@ -137,13 +138,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -s has no meaning for a file sweep")
 			os.Exit(1)
 		}
-		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile, *failOnHit)
+		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile, *failOnHit, *baselinePath)
 		return
+	}
+	if *baselinePath != "" {
+		fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -baseline suppresses -walk findings only; it has no meaning for other modes")
+		os.Exit(2)
 	}
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -305,11 +310,20 @@ func runFS(path string, fsOffset int64, autoSeed bool, jsonOut bool, carveDir st
 // runWalk implements directory-sweep mode: every regular file under root
 // gets the standard detectors, one unreadable file never aborts the
 // sweep, and each file appends its own case-log record.
-func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, profile string, failOnHit bool) {
+func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir string, contextBytes int64, reveal bool, caseLog string, profile string, failOnHit bool, baselinePath string) {
 	opts := detector.WalkOptions{
 		Scan:           detector.Options{CarveDir: carveDir, CarveContextBytes: contextBytes, Reveal: reveal, CaseLogPath: caseLog, ToolVersion: version, Flags: os.Args[1:], Profile: profile},
 		MaxDepth:       maxdepth,
 		FollowSymlinks: follow,
+	}
+	if baselinePath != "" {
+		keys, err := detector.LoadBaselineFingerprints(baselinePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[walk] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		opts.Baseline = keys
+		fmt.Fprintf(os.Stderr, "[walk] baseline %s: %d known findings will stay silent\n", baselinePath, len(keys))
 	}
 	stats, err := detector.Walk(root, opts, func(detection detector.Detection) {
 		if jsonOut {
@@ -336,8 +350,12 @@ func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir stri
 		fmt.Fprintf(os.Stderr, "[walk] Exiting due to error: %s\n", err.Error())
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "[walk] swept %d files: %d detections, %d skipped symlinks, %d skipped special, %d skipped own-output, %d failures.\n",
+	fmt.Fprintf(os.Stderr, "[walk] swept %d files: %d detections, %d skipped symlinks, %d skipped special, %d skipped own-output, %d failures",
 		stats.Files, stats.Detections, stats.SkippedSymlinks, stats.SkippedSpecial, stats.SkippedOwn, stats.FailedTotal)
+	if stats.SuppressedBaseline > 0 {
+		fmt.Fprintf(os.Stderr, ", %d suppressed by baseline", stats.SuppressedBaseline)
+	}
+	fmt.Fprintln(os.Stderr, ".")
 	for _, f := range stats.Failed {
 		fmt.Fprintf(os.Stderr, "[walk] failed: %s: %s\n", f.Path, f.Err)
 	}

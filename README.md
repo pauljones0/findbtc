@@ -255,7 +255,9 @@ Sweep a live system, laptop, or repo with the same detectors:
     findbtc -report sweep.jsonl
 
 Symlinks are not followed by default, one unreadable file never aborts
-the sweep, and each file appends its own case-log record. See the
+the sweep, and each file appends its own case-log record. Repeat
+sweeps suppress reviewed findings with `-baseline known.jsonl` (see
+[the secrets profile](docs/SECRETS_PROFILE.md)). See the
 [runbook](docs/LIVE_SWEEP.md) for policy and live-system notes.
 
 ### Forensic casework

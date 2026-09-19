@@ -46,8 +46,8 @@ completely solve the pain point?"**
 | 25 | FAT/exFAT filesystem support | complete | 61abf5b |
 | 26 | Salvage validation | complete | e13d569 |
 | 27 | Guided mode (-advise) | complete | 938d490 |
-| 28 | Embedding pass (quiet + cancel) | complete | - |
-| 29 | Baseline/allowlist for repeat sweeps | queued | - |
+| 28 | Embedding pass (quiet + cancel) | complete | e256cf6 |
+| 29 | Baseline/allowlist for repeat sweeps | complete | - |
 | 30 | Offline secret verification | queued | - |
 
 ## Global done criteria (every goal)
@@ -796,11 +796,11 @@ gitleaks' answer (baselines + allowlists) has no counterpart here,
 and Goal 24's dogfood step will hit this wall immediately.
 
 **Completely solved when:**
-- [ ] `-baseline hits.jsonl` suppresses known findings across repeat
+- [x] `-baseline hits.jsonl` suppresses known findings across repeat
       sweeps while new hits still report, with documented drift
       behavior (fingerprint must survive file edits — raw offsets
       do not).
-- [ ] Fingerprint stability proven across edit patterns (append,
+- [x] Fingerprint stability proven across edit patterns (append,
       insert-above, rewrite) by test.
 
 **Execute:**
