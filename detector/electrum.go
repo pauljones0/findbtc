@@ -32,6 +32,9 @@ var electrumWordIndex = func() map[string]bool {
 	return m
 }()
 
+// electrum word lengths bound the lookup: tokens outside cannot be in-list.
+var electrumMinLen, electrumMaxLen = wordLenRange(electrumWords)
+
 // electrumSeedPrefixes are the new-seed version prefixes from
 // electrum/version.py: standard, segwit, 2fa, 2fa_segwit. The 2fa prefix
 // additionally constrains word count, which a 12-word window satisfies.
@@ -80,20 +83,33 @@ func findElectrumSeeds(data []byte, baseAbs int64, first, final bool) []electrum
 	data, off := trimEdgeFragments(data, first, final, isBIP39Letter)
 	baseAbs += int64(off)
 	toks := alphaTokens(data)
+	// Lower each token once; windows below only index this cache.
+	lowered := make([]string, len(toks))
+	inList := make([]bool, len(toks))
+	for i, t := range toks {
+		if n := t.end - t.start; n < electrumMinLen || n > electrumMaxLen {
+			continue
+		}
+		w := strings.ToLower(string(data[t.start:t.end]))
+		if electrumWordIndex[w] {
+			lowered[i], inList[i] = w, true
+		}
+	}
 	var out []electrumSeedMatch
 	for i := 0; i+12 <= len(toks); i++ {
-		words := make([]string, 12)
 		ok := true
 		for k := 0; k < 12; k++ {
-			w := strings.ToLower(string(data[toks[i+k].start:toks[i+k].end]))
-			if !electrumWordIndex[w] {
+			if !inList[i+k] {
 				ok = false
 				break
 			}
-			words[k] = w
 		}
 		if !ok {
 			continue
+		}
+		words := make([]string, 12)
+		for k := 0; k < 12; k++ {
+			words[k] = lowered[i+k]
 		}
 		if t := electrumSeedType(words); t != "" {
 			out = append(out, electrumSeedMatch{
@@ -129,7 +145,7 @@ type alphaToken struct {
 
 // alphaTokens splits letter runs; callers lowercase before list lookup.
 func alphaTokens(data []byte) []alphaToken {
-	var out []alphaToken
+	out := make([]alphaToken, 0, len(data)/8+1)
 	for i := 0; i < len(data); {
 		if !isBIP39Letter(data[i]) {
 			i++

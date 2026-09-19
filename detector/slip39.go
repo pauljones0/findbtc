@@ -28,6 +28,9 @@ var slip39WordIndex = func() map[string]int {
 	return m
 }()
 
+// slip39 word lengths bound the lookup: tokens outside cannot be in-list.
+var slip39MinLen, slip39MaxLen = wordLenRange(slip39Words)
+
 // slip39Lengths are the scanned share lengths in words.
 var slip39Lengths = []int{20, 33}
 
@@ -105,27 +108,30 @@ func findSLIP39(data []byte, baseAbs int64, first, final bool) []slip39Match {
 	toks := alphaTokens(data)
 	indexed := make([]int, len(toks))
 	for i, t := range toks {
-		v, ok := slip39WordIndex[strings.ToLower(string(data[t.start:t.end]))]
-		if !ok {
-			indexed[i] = -1
+		indexed[i] = -1
+		if n := t.end - t.start; n < slip39MinLen || n > slip39MaxLen {
 			continue
 		}
-		indexed[i] = v
+		if v, ok := slip39WordIndex[strings.ToLower(string(data[t.start:t.end]))]; ok {
+			indexed[i] = v
+		}
 	}
 	var out []slip39Match
 	for _, n := range slip39Lengths {
 		for i := 0; i+n <= len(toks); i++ {
-			words := make([]string, n)
 			ok := true
 			for k := 0; k < n; k++ {
 				if indexed[i+k] < 0 {
 					ok = false
 					break
 				}
-				words[k] = slip39Words[indexed[i+k]]
 			}
 			if !ok {
 				continue
+			}
+			words := make([]string, n)
+			for k := 0; k < n; k++ {
+				words[k] = slip39Words[indexed[i+k]]
 			}
 			if validSLIP39(words) != nil {
 				continue

@@ -434,9 +434,9 @@ time goes — no `Benchmark*` exists, the reader is a single goroutine on
 scans are slow for unknown reasons, and optimizations would be blind.
 
 **Completely solved when:**
-- [ ] Committed `Benchmark*` scans (raw, nested zip, E01) on fixed
+- [x] Committed `Benchmark*` scans (raw, nested zip, E01) on fixed
       fixtures with a published MB/s table for one reference machine.
-- [ ] The top bottleneck found by profiling is addressed (parallelize
+- [x] The top bottleneck found by profiling is addressed (parallelize
       read/decode or widen blocks) while keeping the
       overlap/exact-offset contract and the full suite green, with
       a measured table improvement.

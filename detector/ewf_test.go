@@ -21,6 +21,13 @@ import (
 // libewf's ewfverify/ewfexport during development, and the committed
 // testdata/ewf-real.E01 fixture below is libewf-produced.
 
+// ewfTB is the *testing.T / *testing.B subset the builders need, so
+// benchmarks reuse the same fixture writers as tests.
+type ewfTB interface {
+	Helper()
+	Fatal(args ...any)
+}
+
 type ewfBuildOpt struct {
 	sectorsPerChunk uint32
 	compress        func(chunk int) bool // default: all compressed
@@ -29,7 +36,7 @@ type ewfBuildOpt struct {
 
 // ewfEncodeChunks zlib-compresses or stores every chunk per comp, the
 // same encoding E01 and SMART share.
-func ewfEncodeChunks(t *testing.T, raw []byte, chunkBytes int, comp func(int) bool) (stored [][]byte, flags []bool) {
+func ewfEncodeChunks(t ewfTB, raw []byte, chunkBytes int, comp func(int) bool) (stored [][]byte, flags []bool) {
 	t.Helper()
 	nch := (len(raw) + chunkBytes - 1) / chunkBytes
 	if comp == nil {
@@ -63,7 +70,7 @@ func ewfEncodeChunks(t *testing.T, raw []byte, chunkBytes int, comp func(int) bo
 	return stored, flags
 }
 
-func buildEWF(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) string {
+func buildEWF(t ewfTB, dir, name string, raw []byte, opt ewfBuildOpt) string {
 	t.Helper()
 	spc := opt.sectorsPerChunk
 	if spc == 0 {
@@ -209,7 +216,7 @@ func ewfTestTable(offs []uint32, base uint64) []byte {
 
 // ewfTestRaw returns deterministic pseudo-random bytes with zeros mixed in
 // so both compressed and stored chunks exercise real paths.
-func ewfTestRaw(t *testing.T, n int) []byte {
+func ewfTestRaw(t ewfTB, n int) []byte {
 	t.Helper()
 	rng := rand.New(rand.NewSource(0xE01))
 	raw := make([]byte, n)
@@ -585,7 +592,7 @@ func firstDiff(a, b []byte) int {
 // the chunk data inline with absolute file offsets, hash/done on the
 // final segment, next-terminated earlier segments, done/next size 76.
 
-func buildSMART(t *testing.T, dir, name string, raw []byte, opt ewfBuildOpt) string {
+func buildSMART(t ewfTB, dir, name string, raw []byte, opt ewfBuildOpt) string {
 	t.Helper()
 	spc := opt.sectorsPerChunk
 	if spc == 0 {

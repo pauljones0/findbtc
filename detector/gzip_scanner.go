@@ -105,7 +105,7 @@ func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sc
 			abs := i + j
 			// Occurrences fully inside the overlap prefix were already
 			// handled with the previous block.
-			if abs+len(GZIP_HEADER) > block.overlap {
+			if abs+len(GZIP_HEADER) > block.overlap && gzipHeaderPlausible(data[abs:]) {
 				openedFiles += scanGzipFile(block.source, block.offset+int64(abs), scanTargets)
 			}
 			i = abs + 1
@@ -118,6 +118,20 @@ func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sc
 		case out <- block:
 		}
 	}
+}
+
+// gzipHeaderPlausible pre-filters 2-byte magic hits using the fixed
+// header bytes already in hand: CM must be 8 (deflate) and the FLG
+// reserved bits must be clear, exactly what gzip.NewReader demands. It
+// returns true whenever it cannot decide (short tail), so the full
+// check below stays authoritative. This matters because the full check
+// opens the source, and opening a zip member inflates it whole —
+// without the pre-filter every random 0x1f8b re-inflates megabytes.
+func gzipHeaderPlausible(tail []byte) bool {
+	if len(tail) < 4 {
+		return true
+	}
+	return tail[2] == 8 && tail[3]&0xE0 == 0
 }
 
 func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget) int {

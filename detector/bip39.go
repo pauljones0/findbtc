@@ -20,6 +20,21 @@ func splitWordlist(raw string) []string {
 	return lines
 }
 
+// wordLenRange returns the shortest/longest word length in a list, so
+// scanners can skip length-impossible tokens before allocating lookups.
+func wordLenRange(words []string) (int, int) {
+	lo, hi := -1, 0
+	for _, w := range words {
+		if lo < 0 || len(w) < lo {
+			lo = len(w)
+		}
+		if len(w) > hi {
+			hi = len(w)
+		}
+	}
+	return lo, hi
+}
+
 var bip39Words = splitWordlist(bip39WordlistRaw)
 
 var bip39WordIndex = func() map[string]uint16 {
@@ -189,7 +204,7 @@ func isBIP39Letter(b byte) bool {
 }
 
 func tokenizeBIP39(data []byte) []bip39Token {
-	var tokens []bip39Token
+	tokens := make([]bip39Token, 0, len(data)/8+1)
 	var lower [16]byte // longest BIP39 word is 8 letters; anything more is invalid
 	for i := 0; i < len(data); {
 		if !isBIP39Letter(data[i]) {
@@ -283,9 +298,17 @@ func exactWindows(tokens []bip39Token, data []byte, baseAbs int64) []bip39ExactW
 	return out
 }
 
+// nearMissKey identifies a gap set for once-only reporting: the window
+// length plus the absolute gap starts (-1 marks "no second gap").
+type nearMissKey struct {
+	length int
+	g0     int64
+	g1     int64
+}
+
 func nearMissWindows(tokens []bip39Token, data []byte, baseAbs int64, exact []bip39ExactWindow, unordered []bip39Unordered) []bip39NearMiss {
 	var out []bip39NearMiss
-	seen := map[string]bool{}
+	seen := map[nearMissKey]bool{}
 	for i := range tokens {
 		for _, length := range bip39Lengths {
 			if i+length > len(tokens) {
@@ -296,24 +319,21 @@ func nearMissWindows(tokens []bip39Token, data []byte, baseAbs int64, exact []bi
 			if span > bip39MaxSpan {
 				break
 			}
-			var gaps []int
+			// Count gaps allocation-free; all-random windows die here.
+			nGaps := 0
+			for _, tok := range seq {
+				if !tok.valid {
+					nGaps++
+				}
+			}
+			if nGaps == 0 || nGaps > bip39MaxUnknown {
+				continue
+			}
+			gaps := make([]int, 0, nGaps)
 			for k, tok := range seq {
 				if !tok.valid {
 					gaps = append(gaps, k)
 				}
-			}
-			if len(gaps) == 0 || len(gaps) > bip39MaxUnknown {
-				continue
-			}
-			// Overlapping windows share gap sets; report each once. The mark
-			// goes down only for survivors: a dropped window must not claim
-			// the gap set and silence a later qualifying one.
-			key := fmt.Sprintf("%d:", length)
-			for _, g := range gaps {
-				key += fmt.Sprintf("%d,", baseAbs+int64(seq[g].start))
-			}
-			if seen[key] {
-				continue
 			}
 			if coveredByExact(i, length, gaps, exact) {
 				continue
@@ -322,6 +342,16 @@ func nearMissWindows(tokens []bip39Token, data []byte, baseAbs int64, exact []bi
 				continue
 			}
 			if overlappedByRun(i, i+length, unordered) {
+				continue
+			}
+			// Overlapping windows share gap sets; report each once. The mark
+			// goes down only for survivors: a dropped window must not claim
+			// the gap set and silence a later qualifying one.
+			key := nearMissKey{length: length, g0: baseAbs + int64(seq[gaps[0]].start), g1: -1}
+			if len(gaps) == 2 {
+				key.g1 = baseAbs + int64(seq[gaps[1]].start)
+			}
+			if seen[key] {
 				continue
 			}
 			seen[key] = true
@@ -418,7 +448,8 @@ func typoCandidates(token string) []uint16 {
 }
 
 // levenshteinBounded computes edit distance, bailing past bound (returns
-// bound+1). Inputs are short lowercase words; plain DP is plenty.
+// bound+1). Inputs are short lowercase words; plain DP over stack
+// buffers is plenty (callers cap length at 10, words at 8).
 func levenshteinBounded(a, b string, bound int) int {
 	if a == b {
 		return 0
@@ -430,12 +461,11 @@ func levenshteinBounded(a, b string, bound int) int {
 	if lb == 0 {
 		return la
 	}
-	prev := make([]int, lb+1)
-	for j := range prev {
+	var prev, curr [17]int
+	for j := 0; j <= lb; j++ {
 		prev[j] = j
 	}
 	for i := 1; i <= la; i++ {
-		curr := make([]int, lb+1)
 		curr[0] = i
 		rowMin := i
 		for j := 1; j <= lb; j++ {
@@ -469,10 +499,11 @@ func validatingCounts(base []uint16, gaps []int, cands [][]uint16) []int {
 		capped[i] = c
 	}
 	out := make([]int, len(gaps))
+	// One scratch buffer serves every trial: the checksum only reads it.
+	indices := make([]uint16, len(base))
+	copy(indices, base)
 	if len(gaps) == 1 {
 		for _, c := range capped[0] {
-			indices := make([]uint16, len(base))
-			copy(indices, base)
 			indices[gaps[0]] = c
 			if bip39ChecksumValid(indices) {
 				out[0]++
@@ -485,8 +516,6 @@ func validatingCounts(base []uint16, gaps []int, cands [][]uint16) []int {
 		marked1 := map[uint16]bool{}
 		for _, c0 := range capped[0] {
 			for _, c1 := range capped[1] {
-				indices := make([]uint16, len(base))
-				copy(indices, base)
 				indices[gaps[0]], indices[gaps[1]] = c0, c1
 				if bip39ChecksumValid(indices) {
 					marked0[c0] = true
@@ -585,7 +614,7 @@ func bip39ChecksumValid(indices []uint16) bool {
 	}
 	totalBits := len(indices) * 11
 	entBits := totalBits - csBits
-	packed := make([]byte, (totalBits+7)/8)
+	var packed [33]byte // 24 words * 11 bits = 264 bits = 33 bytes max
 	for i := 0; i < totalBits; i++ {
 		if indices[i/11]>>(10-(i%11))&1 == 1 {
 			packed[i/8] |= 1 << (7 - (i % 8))
