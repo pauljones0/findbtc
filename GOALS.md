@@ -57,7 +57,7 @@ completely solve the pain point?"**
 | 36 | Git-history secrets via pipes | complete | a5d9355 |
 | 37 | Homebrew tap + Windows managers | complete | 53ed052 |
 | 38 | Multi-target scans + unified report | complete | 3b67a44 |
-| 39 | Completions + man page | queued | - |
+| 39 | Completions + man page | complete | 15d7167 |
 
 ## Global done criteria (every goal)
 
