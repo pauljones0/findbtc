@@ -77,7 +77,9 @@ volume with `-fs-offset` and journal each volume separately.
 
 ## 4. Read the case log
 
-`-case-log case.jsonl` appends one JSON record per scan:
+`-case-log case.jsonl` appends one JSON record per scanned target (a
+multi-target run appends one record per target, in scan order;
+range scans append one per range, as above):
 
 - `source`: path, kind (`raw`, `ewf`, `split`, `range`), size,
   start offset, checkpoint path.

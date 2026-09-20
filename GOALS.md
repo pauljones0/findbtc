@@ -1206,10 +1206,10 @@ staged in-repo — no third-party PRs filed. GoReleaser
 automates formula/manifest regeneration from immutable
 release URLs + SHA256s; `scripts/verify-packaging-pins.py`
 binds URL-arch-SHA structurally (set-membership checking
-was proven insufficient by finding 014; 12-mutant offline
-self-test + live re-proof). install-smoke 4/4 green
-(run 35511710891); local gate FMT clean, VET_OK,
-SUITE_EXIT=0. G37 fixed Windows TestStdinPipeIdentity via
+was proven insufficient by finding 014; the 12-mutant offline
+self-test passed and the live pins re-verified). install-smoke
+4/4 green (run 35511710891); the local gate came back FMT-clean
+with VET_OK and SUITE_EXIT=0. G37 fixed Windows TestStdinPipeIdentity via
 structural parsed-JSON compare. Known pre-existing red,
 unchanged by G37 (ci failing since Goal 27): Windows
 TestAdvise*/TestTokenlist* and password-handoff
@@ -1233,12 +1233,30 @@ loops, 20 JSON files, 20 case logs, hand-merged. Scripting
 copes; forensics reports do not.
 
 **Completely solved when:**
-- [ ] Multiple positionals and/or `-targets FILE` scan in one
+- [x] Multiple positionals and/or `-targets FILE` scan in one
       run with one hits.jsonl (per-hit target already
       recorded) and per-target case-log records.
-- [ ] Per-target failures follow Goal 31 rules (one bad image
+- [x] Per-target failures follow Goal 31 rules (one bad image
       neither zeroes the run nor lies); `-report` groups by
       target.
+
+Decision record (Goal 38): the batch loop lives in main
+(`runMultiTarget`): positionals plus `-targets` entries scan
+in order into one hits stream, and each `ScanWithOptions`
+call appends its own case-log record, so per-target records
+fall out with no detector change. Exits mirror the Goal 31
+walk rule — loud per-target `failed:` lines plus WARNING
+when any target fails, exit 1 only on zero scanned.
+Single-target-only inputs (`-s`, `-checkpoint`/`-resume`,
+stdin sharing a run) refuse with exit 2. Carve numbering
+threads `CarveSeqStart` across targets counting every
+delivered detection (the pipeline carves before main's
+baseline suppression, so printed hits alone would
+undercount). `-report` text groups hits under sorted
+per-target headers with full counts and spans; the JSON
+shape is unchanged. Full gate FMT clean, VET_OK,
+SUITE_EXIT=0; mixed good/bad batch fixture in
+`TestMultiTargetBatch`.
 
 **Execute:**
 1. Accept N targets; loop with per-target record keeping.

@@ -309,3 +309,38 @@ func TestSummarizeSecretsPlaybook(t *testing.T) {
 		t.Errorf("encrypted hits = %d, want 0 (secrets are not wallets)", rep.EncryptedHits)
 	}
 }
+
+// Report text groups hits by target (Goal 38): one sorted section
+// per image with its full hit count and offset span, hits beneath
+// their own header in offset order.
+func TestReportTextGroupsByTarget(t *testing.T) {
+	dets := []Detection{
+		reportFixtureDetection("bestblock", "b.img", 300),
+		reportFixtureDetection("wif", "a.img", 50),
+		reportFixtureDetection("bestblock", "b.img", 100),
+	}
+	text := Summarize(dets).Text()
+	aHead := strings.Index(text, "a.img (1 hit, offsets 50-50)")
+	bHead := strings.Index(text, "b.img (2 hits, offsets 100-300)")
+	if aHead < 0 || bHead < 0 {
+		t.Fatalf("want per-target headers with counts and spans, got:\n%s", text)
+	}
+	if aHead > bHead {
+		t.Errorf("target sections must sort by target, got:\n%s", text)
+	}
+	// Bracketed anchors skip the Types: header, which names the
+	// same types before the grouped sections.
+	wif := strings.Index(text, "[high] private-key-wif")
+	best := strings.Index(text, "[medium] bitcoin-core-legacy")
+	if wif < 0 || best < 0 {
+		t.Fatalf("hits missing from grouped text, got:\n%s", text)
+	}
+	if !(aHead < wif && wif < bHead && bHead < best) {
+		t.Errorf("each hit must sit under its own target header, got:\n%s", text)
+	}
+	for _, h := range strings.Split(text, "\n") {
+		if strings.HasPrefix(h, "    [") && (strings.Contains(h, "a.img") || strings.Contains(h, "b.img")) {
+			t.Errorf("grouped hit lines must not repeat the target: %q", h)
+		}
+	}
+}

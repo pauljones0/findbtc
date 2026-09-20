@@ -252,3 +252,32 @@ func TestHashCommands(t *testing.T) {
 		t.Fatalf("cmds = %q\nwant %q", cmds, want)
 	}
 }
+
+// -targets FILE joins positionals (Goal 38): positionals first,
+// then listed paths; blanks and # comments skipped; a missing
+// list file is an error naming the file.
+func TestResolveScanTargets(t *testing.T) {
+	dir := t.TempDir()
+	list := filepath.Join(dir, "targets.txt")
+	body := "# batch\n\n  b.img  \n# another comment\nc.img\n"
+	if err := os.WriteFile(list, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveScanTargets([]string{"a.img"}, list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"a.img", "b.img", "c.img"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("targets = %q, want %q", got, want)
+	}
+	got, err = resolveScanTargets([]string{"a.img"}, "")
+	if err != nil || len(got) != 1 || got[0] != "a.img" {
+		t.Fatalf("no list file must pass positionals through, got %q, %v", got, err)
+	}
+	if _, err := resolveScanTargets(nil, filepath.Join(dir, "missing.txt")); err == nil {
+		t.Fatal("missing list file must error")
+	} else if !strings.Contains(err.Error(), "missing.txt") {
+		t.Errorf("error must name the list file, got %q", err.Error())
+	}
+}

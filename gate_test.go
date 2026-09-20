@@ -1020,3 +1020,159 @@ func TestSecretsGateWorkflowWiring(t *testing.T) {
 		t.Error("hook sample drifted from the tested sweep shape")
 	}
 }
+
+// Multi-target batch (Goal 38): one run over mixed good/bad
+// targets prints one hits stream with per-hit targets, appends one
+// case-log record per scanned target, warns loudly about the bad
+// one, and still exits 0 with [COMPLETE] — the Goal 31 walk rule.
+// An all-bad batch exits 1 with no [COMPLETE].
+func TestMultiTargetBatch(t *testing.T) {
+	dir := t.TempDir()
+	mkhit := func(name string) string {
+		return writeGateFile(t, dir, name, strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	}
+	good1, good2 := mkhit("batch1.bin"), mkhit("batch2.bin")
+	missing := filepath.Join(dir, "no-such-image.bin")
+	caseLog := filepath.Join(dir, "case.jsonl")
+
+	stdout, stderr, exit := runTestBinary(t, "-json", "-case-log", caseLog, good1, missing, good2)
+	if exit != 0 {
+		t.Fatalf("mixed batch exit %d, want 0 (stderr:\n%s)", exit, stderr)
+	}
+	if !strings.Contains(stderr, "[COMPLETE]") {
+		t.Errorf("mixed batch must print [COMPLETE], stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, missing) {
+		t.Errorf("mixed batch must warn loudly naming %s, stderr:\n%s", missing, stderr)
+	}
+	// One hits stream, both targets labeled.
+	var targets []string
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("hit is not JSON: %v\n%s", err, line)
+		}
+		tgt, _ := m["target"].(string)
+		targets = append(targets, tgt)
+	}
+	seen := map[string]bool{}
+	for _, tg := range targets {
+		seen[tg] = true
+	}
+	if !seen[good1] || !seen[good2] {
+		t.Errorf("one stream must carry both targets, got %v", targets)
+	}
+	if len(targets) == 0 {
+		t.Error("batch fixtures produced no hits; test is vacuous")
+	}
+	// One case-log record per scanned target.
+	raw, err := os.ReadFile(caseLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		var rec struct {
+			Status string `json:"status"`
+			Source struct {
+				Path string `json:"path"`
+			} `json:"source"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("case-log line is not JSON: %v\n%s", err, line)
+		}
+		if rec.Status != "complete" {
+			t.Errorf("scanned target logged status %q, want complete", rec.Status)
+		}
+		logged = append(logged, rec.Source.Path)
+	}
+	if len(logged) != 2 || logged[0] != good1 || logged[1] != good2 {
+		t.Errorf("want per-target records [good1 good2] in scan order, got %v", logged)
+	}
+
+	// All-bad batch: zero coverage exits 1 with no [COMPLETE].
+	_, stderr, exit = runTestBinary(t, "-json", filepath.Join(dir, "missing-a.bin"), filepath.Join(dir, "missing-b.bin"))
+	if exit != 1 {
+		t.Errorf("all-bad batch exit %d, want 1 (stderr:\n%s)", exit, stderr)
+	}
+	if strings.Contains(stderr, "[COMPLETE]") {
+		t.Errorf("all-bad batch must not print [COMPLETE], stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "nothing was covered") {
+		t.Errorf("all-bad batch must say nothing was covered, stderr:\n%s", stderr)
+	}
+}
+
+// -targets FILE joins positionals: blank lines and # comments are
+// skipped, positionals scan first. A missing list file exits 1.
+func TestTargetsFile(t *testing.T) {
+	dir := t.TempDir()
+	good := writeGateFile(t, dir, "listed.bin", strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	first := writeGateFile(t, dir, "first.bin", strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	list := writeGateFile(t, dir, "targets.txt", "# batch list\n\n"+good+"\n")
+	caseLog := filepath.Join(dir, "case.jsonl")
+
+	stdout, stderr, exit := runTestBinary(t, "-json", "-case-log", caseLog, "-targets", list, first)
+	if exit != 0 {
+		t.Fatalf("-targets run exit %d (stderr:\n%s)", exit, stderr)
+	}
+	if !strings.Contains(stdout, first) || !strings.Contains(stdout, good) {
+		t.Errorf("-targets run must carry positional and listed hits, stdout:\n%s", stdout)
+	}
+	raw, err := os.ReadFile(caseLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want 2 case-log records, got %d", len(lines))
+	}
+	var rec struct {
+		Source struct {
+			Path string `json:"path"`
+		} `json:"source"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Source.Path != first {
+		t.Errorf("positional must scan before listed targets, first record is %s", rec.Source.Path)
+	}
+
+	_, stderr, exit = runTestBinary(t, "-targets", filepath.Join(dir, "no-list.txt"), first)
+	if exit != 1 {
+		t.Errorf("missing -targets file exit %d, want 1 (stderr:\n%s)", exit, stderr)
+	}
+	if !strings.Contains(stderr, "no-list.txt") {
+		t.Errorf("missing -targets file must be named, stderr:\n%s", stderr)
+	}
+}
+
+// Single-target-only inputs refuse loudly in a multi-target run:
+// stdin cannot be consumed twice, one -s cannot offset N targets,
+// and a checkpoint journals one target.
+func TestMultiTargetRefusals(t *testing.T) {
+	dir := t.TempDir()
+	a := writeGateFile(t, dir, "a.bin", "nothing here")
+	b := writeGateFile(t, dir, "b.bin", "nothing here either")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"stdin-mix", []string{"-", a}, "scanned alone"},
+		{"start-offset", []string{"-s", "10", a, b}, "-s offsets one target"},
+		{"checkpoint", []string{"-checkpoint", filepath.Join(dir, "c.json"), a, b}, "journal one target"},
+		{"resume", []string{"-checkpoint", filepath.Join(dir, "c.json"), "-resume", a, b}, "journal one target"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, exit := runTestBinary(t, tc.args...)
+			if exit != 2 {
+				t.Errorf("%s exit %d, want 2 (stderr:\n%s)", tc.name, exit, stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("%s must explain %q, stderr:\n%s", tc.name, tc.want, stderr)
+			}
+		})
+	}
+}

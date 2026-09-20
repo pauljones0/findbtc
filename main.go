@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -76,6 +77,7 @@ func main() {
 	caseLog := flag.String("case-log", "", "Append a JSON case-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)")
 	profile := flag.String("profile", "", "Detector set: empty (wallet matchers) or secrets (adds private-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)")
 	failOnHit := flag.Bool("fail-on-hit", false, "Exit 3 when the scan or report finds anything (for CI gates and pre-commit hooks); without it, finding hits still exits 0")
+	targetsFile := flag.String("targets", "", "Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals")
 	flag.Parse()
 	switch *profile {
 	case "", "default", "secrets":
@@ -215,13 +217,40 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -baseline suppresses -walk and -patch findings only; it has no meaning for other modes")
 		os.Exit(2)
 	}
-	path := flag.Arg(0)
+	targets, terr := resolveScanTargets(flag.Args(), *targetsFile)
+	if terr != nil {
+		fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", terr.Error())
+		os.Exit(1)
+	}
 
-	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] [-patch [-baseline FILE]] DEVICE|-\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+	if len(targets) == 0 {
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] [-patch [-baseline FILE]] [-targets FILE] TARGET [TARGET ...] | -\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
+
+	// Multi-target runs (Goal 38) refuse the single-target-only
+	// inputs loudly: stdin can be consumed once, one -s offset
+	// cannot mean something per target, and a checkpoint journals
+	// one target's progress.
+	multi := len(targets) > 1
+	if multi {
+		for _, t := range targets {
+			if t == "-" {
+				fmt.Fprintln(os.Stderr, "[main] Exiting due to error: - (stdin) can only be scanned alone; it cannot share a run with other targets")
+				os.Exit(2)
+			}
+		}
+		if *startOffset != 0 {
+			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -s offsets one target; it cannot offset a multi-target run")
+			os.Exit(2)
+		}
+		if *resume || *checkpointPath != "" {
+			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume journal one target; they are not supported with multiple targets")
+			os.Exit(2)
+		}
+	}
+	path := targets[0]
 
 	// Pipes scan through a bounded spill (Goal 35): byte-identical
 	// detections, but no resume and no range modes — a journaled
@@ -340,6 +369,10 @@ func main() {
 			}
 		}
 	}
+	if multi {
+		runMultiTarget(targets, *unallocatedOnly, *fsOffset, !fsOffsetSet, opts, printDetection, &hits, &suppressed, *failOnHit)
+		return
+	}
 	var err error
 	if *unallocatedOnly {
 		err = runUnallocated(path, *fsOffset, !fsOffsetSet, start, opts, printDetection)
@@ -359,6 +392,89 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[main] %d suppressed by baseline\n", suppressed)
 	}
 	gateOnHits("main", hits, *failOnHit)
+}
+
+// resolveScanTargets joins positional targets with -targets FILE
+// entries (one path per line; blank lines and # comments skipped).
+// Positionals keep their order first so `findbtc a.img -targets
+// rest.txt` scans a.img before the listed paths.
+func resolveScanTargets(positionals []string, listPath string) ([]string, error) {
+	targets := append([]string{}, positionals...)
+	if listPath == "" {
+		return targets, nil
+	}
+	f, err := os.Open(listPath)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read -targets file %s: %w", listPath, err)
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		targets = append(targets, line)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("cannot read -targets file %s: %w", listPath, err)
+	}
+	return targets, nil
+}
+
+// runMultiTarget scans each target in order with one shared hits
+// stream and one case-log record per target. Coverage follows the
+// Goal 31 walk rule: one bad target neither zeroes the run nor
+// lies — failures print loudly and the run continues; only zero
+// scanned targets exits 1.
+func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed bool, opts detector.Options, onDetection func(detector.Detection), hits, suppressed *int, failOnHit bool) {
+	prog := newProgressReporter()
+	scanned := 0
+	failed := 0
+	// Carve numbering continues across targets (walk threads
+	// CarveSeqStart the same way): every delivered detection
+	// consumes a sequence number, including ones the baseline
+	// later suppresses — the pipeline carves before main sees
+	// the hit, so only the undelivered total keeps filenames
+	// unique.
+	seqBase := opts.CarveSeqStart
+	for _, tgt := range targets {
+		targetOpts := opts
+		targetOpts.CarveSeqStart = seqBase
+		var n int
+		counting := func(d detector.Detection) {
+			n++
+			onDetection(d)
+		}
+		var err error
+		if unallocated {
+			err = runUnallocated(tgt, fsOffset, autoSeed, 0, targetOpts, counting)
+		} else {
+			err = detector.ScanWithOptions(0, tgt, targetOpts, counting, prog.onProgress)
+		}
+		seqBase += n
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[main] failed: %s: %s\n", tgt, err.Error())
+			failed++
+			continue
+		}
+		scanned++
+	}
+	fmt.Fprintf(os.Stderr, "[main] scanned %d of %d targets: %d complete, %d failed.\n",
+		scanned, len(targets), scanned, failed)
+	if failed > 0 {
+		fmt.Fprintf(os.Stderr, "[main] WARNING: %d target(s) could not be scanned; coverage is incomplete.\n", failed)
+	}
+	if scanned == 0 {
+		fmt.Fprintf(os.Stderr, "[main] Exiting due to error: scanned 0 of %d targets, nothing was covered\n", len(targets))
+		os.Exit(1)
+	}
+	fmt.Fprintln(os.Stderr, "[COMPLETE]")
+	if *suppressed > 0 {
+		fmt.Fprintf(os.Stderr, "[main] %d suppressed by baseline\n", *suppressed)
+	}
+	gateOnHits("main", *hits, failOnHit)
 }
 
 // runUnallocated implements --unallocated-only: scan just the free space

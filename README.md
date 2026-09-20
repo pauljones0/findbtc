@@ -83,7 +83,7 @@ releases, and `go.mod` floors the language version at 1.24.
 
 ## Usage
 
-    findbtc [-s start-offset] [-json] [-extract-dir DIR [-context BYTES]] DEVICE
+    findbtc [-s start-offset] [-json] [-extract-dir DIR [-context BYTES]] [-targets FILE] TARGET [TARGET ...]
 
     # Eg. scan a disk, printing human-readable hits:
 
@@ -105,6 +105,12 @@ releases, and `go.mod` floors the language version at 1.24.
 
     dd if=/dev/sda bs=1M | findbtc -json - > hits.jsonl
 
+    # Eg. scan several images in one run, one hits file out:
+
+    findbtc -json -case-log case.jsonl img1.E01 img2.raw > hits.jsonl
+    # or list the targets in a file (one path per line):
+    findbtc -json -case-log case.jsonl -targets batch.txt > hits.jsonl
+
 Not sure which mode fits your target? Ask first — it only inspects,
 never scans:
 
@@ -115,8 +121,8 @@ to stderr, so `-json` output stays parseable. Exit codes are a contract:
 
 | Code | Meaning |
 | ---- | ------- |
-| 0 | The run completed and covered its target — hits or not. A `-walk` that scanned at least one file exits 0 even when other files failed (failures print loudly). |
-| 1 | Runtime error or zero coverage: the root target could not be read (missing, unreadable, vanished mid-run), or a `-walk` scanned nothing at all. The reason is on stderr. |
+| 0 | The run completed and covered its target — hits or not. A `-walk` that scanned at least one file, or a multi-target run that scanned at least one target, exits 0 even when others failed (failures print loudly with a `WARNING`). |
+| 1 | Runtime error or zero coverage: the root target could not be read (missing, unreadable, vanished mid-run), or a `-walk` / multi-target run scanned nothing at all. The reason is on stderr. |
 | 2 | Bad flags/usage. |
 | 3 | Hits found — but only with `-fail-on-hit`, which gates CI and pre-commit hooks (see [docs/SECRETS_PROFILE.md](docs/SECRETS_PROFILE.md)). |
 
@@ -192,7 +198,8 @@ rescanning:
 
 The report answers "is there anything here worth pursuing": per-type
 counts with duplicates merged, per-hit confidence, encryption flags,
-byte-offset spans per target, and prioritized next steps. `-report -`
+and prioritized next steps, with hits grouped under one section per
+target (each with its hit count and byte-offset span). `-report -`
 reads from stdin; add `-json` for the machine-readable report. Like the
 scanner, the report prints type labels only — never key or seed material.
 An empty hits file gets a coverage note instead of a clean bill of

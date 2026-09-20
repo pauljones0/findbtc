@@ -363,30 +363,43 @@ func (r Report) Text() string {
 		}
 		b.WriteString("\n")
 	}
+	// Hits group by target (rep.Hits is already sorted target,
+	// then offset): a multi-target report reads as one section
+	// per image, each with its full hit count and offset span.
+	// The maxTextHits cap applies across groups; the "... and N
+	// more" tail counts unshown hits in every group.
+	byTarget := map[string][]ReportHit{}
+	for _, h := range r.Hits {
+		byTarget[h.Target] = append(byTarget[h.Target], h)
+	}
+	b.WriteString("Hits by target:\n")
+	shown := 0
 	for _, t := range r.Targets {
+		hs := byTarget[t]
 		sp := r.Spans[t]
-		fmt.Fprintf(&b, "Offsets %s: %d-%d\n", t, sp.Min, sp.Max)
-	}
-	b.WriteString("Hits:\n")
-	shown := r.Hits
-	more := 0
-	if len(shown) > maxTextHits {
-		more = len(shown) - maxTextHits
-		shown = shown[:maxTextHits]
-	}
-	for _, h := range shown {
-		carve := ""
-		if h.CarvePath != "" {
-			carve = " carve=" + h.CarvePath
+		hitWord := "hits"
+		if len(hs) == 1 {
+			hitWord = "hit"
 		}
-		name := ""
-		if h.FileName != "" {
-			name = " file=" + h.FileName
+		fmt.Fprintf(&b, "  %s (%d %s, offsets %d-%d):\n", t, len(hs), hitWord, sp.Min, sp.Max)
+		for _, h := range hs {
+			if shown >= maxTextHits {
+				break
+			}
+			shown++
+			carve := ""
+			if h.CarvePath != "" {
+				carve = " carve=" + h.CarvePath
+			}
+			name := ""
+			if h.FileName != "" {
+				name = " file=" + h.FileName
+			}
+			fmt.Fprintf(&b, "    [%s] %s (%s) @%d%s%s\n",
+				h.Confidence, h.Type, h.Needle, h.Offset, carve, name)
 		}
-		fmt.Fprintf(&b, "  [%s] %s (%s) %s @%d%s%s\n",
-			h.Confidence, h.Type, h.Needle, h.Target, h.Offset, carve, name)
 	}
-	if more > 0 {
+	if more := len(r.Hits) - shown; more > 0 {
 		fmt.Fprintf(&b, "  ... and %d more (see -json for the full list)\n", more)
 	}
 	b.WriteString("Next steps:\n")
