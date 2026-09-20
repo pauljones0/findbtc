@@ -1836,3 +1836,50 @@ func TestFlagsBeforeTargets(t *testing.T) {
 		t.Errorf("bare dash filename exit %d, want 2 (flag parse must fail)", exit)
 	}
 }
+
+// A batch run journals per-target digests; the -resume rerun
+// skips both targets without re-scanning, and a tampered target
+// rescans loudly instead of skipping.
+func TestBatchCheckpointResumeCLI(t *testing.T) {
+	dir := t.TempDir()
+	a := writeGateFile(t, dir, "a.bin", strings.Repeat("q", 5000)+"bestblock"+strings.Repeat("q", 5000))
+	b := writeGateFile(t, dir, "b.bin", strings.Repeat("q", 5000)+"defaultkey"+strings.Repeat("q", 5000))
+	ckpt := filepath.Join(dir, "batch.cp")
+	_, stderr, exit := runTestBinary(t, "-checkpoint", ckpt, a, b)
+	if exit != 0 {
+		t.Fatalf("batch run exit %d:\n%s", exit, stderr)
+	}
+	stdout, stderr, exit := runTestBinary(t, "-checkpoint", ckpt, "-resume", a, b)
+	if exit != 0 {
+		t.Fatalf("batch resume exit %d:\n%s", exit, stderr)
+	}
+	if strings.Count(stderr, "batch: skipping") != 2 {
+		t.Errorf("resume must skip both targets, stderr:\n%s", stderr)
+	}
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("skipped resume must print no hits:\n%s", stdout)
+	}
+	// Tamper target B (same size): the next resume rescans it
+	// loudly while still skipping A.
+	raw, err := os.ReadFile(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[100] ^= 0xff
+	if err := os.WriteFile(b, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit = runTestBinary(t, "-checkpoint", ckpt, "-resume", a, b)
+	if exit != 0 {
+		t.Fatalf("tampered resume exit %d:\n%s", exit, stderr)
+	}
+	if strings.Count(stderr, "batch: skipping") != 1 || !strings.Contains(stderr, "skipping "+a) {
+		t.Errorf("tampered resume must skip only A, stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "fails digest verification") && !strings.Contains(stderr, "changed since completion") {
+		t.Errorf("tampered target must warn loudly, stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "defaultkey") {
+		t.Errorf("rescan must re-report B hits:\n%s", stdout)
+	}
+}

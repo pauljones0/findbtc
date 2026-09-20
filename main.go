@@ -391,11 +391,14 @@ func main() {
 			// journal point still match; the announcement and
 			// percent below name the rewound point actually
 			// scanned. -s keeps its exact offset and never
-			// rewinds. The frontier is honored only when the
-			// current bytes still match the journaled
-			// identity — replaced bytes rescan from zero
-			// instead of skipping contents never read.
-			if trustOff, _, note := detector.IdentityTrust(cp.Ident, path); !trustOff {
+			// rewinds. The detector verifies the frontier
+			// proof on its own handle before honoring it —
+			// replaced bytes rescan from zero instead of
+			// skipping contents never read. Main only
+			// pre-screens the cheap tier so the announcement
+			// names the likely point; a pass here authorizes
+			// nothing.
+			if reject, note := detector.CheapTierReject(cp.Ident, path); reject {
 				fmt.Fprintf(os.Stderr, "[main] WARNING: %s\n", note)
 				start = 0
 			} else {
@@ -693,14 +696,13 @@ func openBatchManifest(targets []string, checkpointPath string, resume bool, run
 func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, checkpointPath string, log io.Writer) (int64, bool) {
 	entry := &m.Targets[i]
 	size, mtime := detector.BatchIdentity(tgt)
-	trustOff, trustCov, note := detector.IdentityTrust(entry.Ident, tgt)
 	if resume && entry.State == detector.BatchComplete {
 		// A skip vouches for these exact bytes: a journaled
-		// digest re-hashes, and digest-less entries
-		// (resumed-then-completed, or journals predating
-		// digests) skip only on exact identity. Anything
-		// else rescans loudly — a replaced target is new
-		// evidence, not covered evidence.
+		// digest re-hashes on one handle with stability
+		// checked, and anything else — digest-less entries
+		// from legacy journals included — rescans loudly. A
+		// replaced target is new evidence, not covered
+		// evidence.
 		skip := false
 		if entry.SHA256 != "" {
 			if !detector.BatchIdentityMatches(*entry, size, mtime) {
@@ -711,10 +713,7 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 				skip = true
 			}
 		} else {
-			skip = trustOff
-			if !skip {
-				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
-			}
+			fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s has no digest journaled; rescanning from the start\n", tgt)
 		}
 		if skip {
 			fmt.Fprintf(os.Stderr, "[main] batch: skipping %s (already complete)\n", tgt)
@@ -722,6 +721,7 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 		}
 		entry.Offset = 0
 		entry.Covered = nil
+		entry.Proof = nil
 	}
 	start := int64(0)
 	if resume && (entry.State == detector.BatchActive || entry.State == detector.BatchFailed) {
@@ -729,30 +729,27 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 		if entry.State == detector.BatchFailed {
 			verb = "retrying failed target"
 		}
-		if entry.Offset > 0 && trustOff {
-			start = detector.ResumeRewindOffset(0, entry.Offset)
-			msg := fmt.Sprintf("[main] batch: %s %s at byte offset %d", verb, tgt, start)
-			if size > 0 && start >= 0 && start <= size {
-				msg += fmt.Sprintf(" (continuing at %d%%)", start*100/size)
-			}
-			fmt.Fprintln(os.Stderr, msg)
-		} else {
-			if entry.Offset > 0 {
+		// The detector verifies the frontier proof on its own
+		// handle; main only pre-screens the cheap tier so the
+		// announcement names the likely point. Filed
+		// proof/covered always travel to the detector, which
+		// verifies-or-restarts authoritatively.
+		if entry.Offset > 0 {
+			if reject, _ := detector.CheapTierReject(entry.Ident, tgt); reject {
 				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since the journal entry; rescanning from the start\n", tgt)
+				// Start over but leave the filed claim
+				// intact: the detector re-decides
+				// authoritatively on its own handle.
 			} else {
-				fmt.Fprintf(os.Stderr, "[main] batch: %s %s from the start\n", verb, tgt)
-				if !trustCov && len(entry.Covered) > 0 && note != "" {
-					fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s; banked members re-scanned\n", note)
+				start = detector.ResumeRewindOffset(0, entry.Offset)
+				msg := fmt.Sprintf("[main] batch: %s %s at byte offset %d", verb, tgt, start)
+				if size > 0 && start >= 0 && start <= size {
+					msg += fmt.Sprintf(" (continuing at %d%%)", start*100/size)
 				}
+				fmt.Fprintln(os.Stderr, msg)
 			}
-			entry.Offset = 0
-		}
-		// Banked members survive only for the same bytes: a
-		// rewound (offset 0) journal keeps its covered set,
-		// while replaced bytes drop it — stale keys would
-		// defer members never read in the current content.
-		if !trustCov {
-			entry.Covered = nil
+		} else {
+			fmt.Fprintf(os.Stderr, "[main] batch: %s %s from the start\n", verb, tgt)
 		}
 	}
 	entry.State = detector.BatchActive

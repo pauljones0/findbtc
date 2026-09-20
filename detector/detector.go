@@ -297,6 +297,141 @@ type Options struct {
 	Context context.Context
 	// caseRec carries the active recorder from runPipeline to scanBlocks.
 	caseRec *caseRecorder
+	// runResume carries an already-verified resume adoption into
+	// runPipeline; set by ScanRangesWithOptions for range
+	// pipelines (which verify on their shared handle), never by
+	// callers. Whole-file pipelines verify inside runPipeline.
+	runResume *runResume
+	// rangeProofs accumulates completed-range proofs across the
+	// sequential range pipelines of one ScanRangesWithOptions
+	// call; set by the range driver, never by callers.
+	rangeProofs *rangeProofAcc
+}
+
+// rangeProofAcc accumulates completed-range proofs across one
+// range scan's sequential pipelines.
+type rangeProofAcc struct {
+	proofs []RangeProof
+}
+
+// snapshot copies the accumulated proofs for journaling.
+func (a *rangeProofAcc) snapshot() []RangeProof {
+	if a == nil {
+		return nil
+	}
+	return append([]RangeProof(nil), a.proofs...)
+}
+
+// appendRangeProof records a completed range's proof. Ranges
+// complete in order, so appends are ordered by index.
+func (a *rangeProofAcc) appendRangeProof(p RangeProof) {
+	if a == nil {
+		return
+	}
+	a.proofs = append(a.proofs, p)
+}
+
+// runResume is a verified resume adoption: the proof spans were
+// re-read and hashed equal on the handle the scan consumes, so
+// the digest seeds from the verified prefix and covered members
+// filter against the verified spans. Whole-file pipelines build
+// one inside runPipeline; range pipelines receive one from
+// ScanRangesWithOptions.
+type runResume struct {
+	// spans are the verified absolute spans; covered members
+	// keep only provenance inside them.
+	spans [][2]int64
+	// digest is the verified prefix's live hash state; the run
+	// keeps streaming from it.
+	digest hash.Hash
+	// digestBase/digestLen bound the verified span absolutely
+	// ([digestBase, digestLen)); the run skips re-feeding reads
+	// below digestLen.
+	digestBase int64
+	digestLen  int64
+	// covered carries the filed member keys for span filtering.
+	covered []string
+}
+
+// resumeClaim is a journaled whole-file resume case awaiting
+// verification on the opened handle: the claimed coverage offset,
+// the proof that must authorize it, the filed members, and the
+// filed identity for the cheap tier.
+type resumeClaim struct {
+	offset  int64
+	proof   *PrefixProof
+	covered []string
+	ident   FileIdentity
+}
+
+// loadResumeClaim reads the journal's case for seed, or nil when
+// there is none. A stale journal beside an explicit caller start
+// is silently ignored (the caller asserted its start); shape and
+// proof problems warn through note and rescan. The cheap tier and
+// proof verification happen in runPipeline on the opened handle;
+// this only assembles the case.
+func loadResumeClaim(opts Options, seed scanTarget, runStart int64) (claim *resumeClaim, note string, coveredN int) {
+	if opts.CheckpointPath == "" {
+		return nil, "", 0
+	}
+	cp, err := ReadCheckpoint(opts.CheckpointPath)
+	if err != nil {
+		return nil, "", 0
+	}
+	desc := seed.Describe()
+	if cp.IsBatch() {
+		for _, t := range cp.Targets {
+			if t.State != BatchActive {
+				continue
+			}
+			if t.Path != desc {
+				return nil, fmt.Sprintf("journal active entry is %s, scanning %s; starting from the beginning", t.Path, desc), len(t.Covered)
+			}
+			return claimForEntry(t.Offset, t.Proof, t.Covered, t.Ident, runStart, opts.Resume)
+		}
+		return nil, "", 0
+	}
+	if len(cp.Ranges) > 0 {
+		return nil, fmt.Sprintf("checkpoint %s is a range-scan journal; refusing it for a whole-file scan", opts.CheckpointPath), len(cp.Covered)
+	}
+	if cp.Path != desc {
+		return nil, fmt.Sprintf("checkpoint is for %s, not %s; starting from the beginning", cp.Path, desc), len(cp.Covered)
+	}
+	return claimForEntry(cp.Offset, cp.Proof, cp.Covered, cp.Ident, runStart, opts.Resume)
+}
+
+// claimForEntry builds the verification case for one filed
+// (offset, proof, covered, ident) tuple, or nil when the run does
+// not continue that point. Both exact-offset callers (doc.go: pass
+// the journal offset back) and rewound callers (main.go: straddler
+// safety) continue the point. An explicit caller start elsewhere
+// is silently honored (no stale-journal interference); a resume
+// run that does not continue the journal point warns. Unprovable
+// points (missing proof, foreign span, short span) always warn:
+// only proof{Start: streamBase, Len >= offset} can authorize the
+// offset, so explicit -s skips and legacy journals rescan.
+// coveredN reports filed members for the banked-members warning
+// on refusal paths.
+func claimForEntry(offset int64, proof *PrefixProof, covered []string, ident FileIdentity, runStart int64, resume bool) (*resumeClaim, string, int) {
+	if offset == 0 && len(covered) == 0 {
+		return nil, "", 0
+	}
+	if runStart != rewindOffset(0, offset) && runStart != offset {
+		if !resume {
+			return nil, "", 0
+		}
+		return nil, fmt.Sprintf("run starts at byte %d but the journal point is %d; starting from the beginning", runStart, offset), len(covered)
+	}
+	if proof == nil {
+		return nil, "journal predates content proofs; rescanning from the start", len(covered)
+	}
+	if proof.Start != 0 {
+		return nil, "journal offset was an explicit skip, never proven bytes; rescanning from the start", len(covered)
+	}
+	if proof.Len < offset {
+		return nil, "journal proof is shorter than the journaled offset; rescanning from the start", len(covered)
+	}
+	return &resumeClaim{offset: offset, proof: proof, covered: covered, ident: ident}, "", 0
 }
 
 // BadSectorFunc reports an unreadable byte range [start, end) in a target.
@@ -486,24 +621,49 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 	}
 	startIdx := 0
 	var startOff int64 = -1
+	acc := &rangeProofAcc{}
+	var active *runResume
+	// shared pins one handle for verification plus every range
+	// pipeline of a resume, so no swap can land between the
+	// proof check and the scans. Fresh scans open per range as
+	// before (no skips, nothing to bind).
+	var shared *os.File
 	if opts.Resume {
 		if opts.CheckpointPath == "" {
 			return recordAttempt(opts, path, fmt.Errorf("resume requires a checkpoint path"))
 		}
-		idx, off, resume, err := readRangeResume(opts.logWriter(), opts.CheckpointPath, path, ranges)
+		plan, err := readRangeResume(opts.logWriter(), opts.CheckpointPath, path, ranges)
 		if err != nil {
 			return recordAttempt(opts, path, err)
 		}
-		if !resume {
-			return nil // journal says the list already completed
+		if !plan.fresh {
+			f, ferr := os.Open(path)
+			if ferr != nil {
+				return recordAttempt(opts, path, ferr)
+			}
+			shared = f
+			var complete bool
+			_, pre, preOK := FileIdentityOfFile(shared)
+			startIdx, startOff, acc, active, complete = verifyRangePlan(opts.logWriter(), shared, path, ranges, plan)
+			if complete {
+				shared.Close()
+				return nil // verified proofs say the list already completed
+			}
+			defer func() {
+				if preOK {
+					if _, post, postOK := FileIdentityOfFile(shared); postOK && !pre.Matches(post) {
+						opts.logf("[scan] WARNING: %s changed during the scan; output may mix bytes (resume re-verifies)\n", path)
+					}
+				}
+				shared.Close()
+			}()
 		}
-		startIdx, startOff = idx, off
 		// A missing journal already announced a fresh start inside
 		// readRangeResume; only a real journal point gets a
-		// resume-position line.
-		if off >= 0 {
+		// resume-position line, printed from the VERIFIED point.
+		if startOff >= 0 {
 			opts.logf("[checkpoint] Resuming %s at range %d of %d%s\n",
-				path, resumeDisplayIndex(ranges, idx, off)+1, len(ranges), rangeResumePercent(ranges, idx, off))
+				path, resumeDisplayIndex(ranges, startIdx, startOff)+1, len(ranges), rangeResumePercent(ranges, startIdx, startOff))
 		}
 	}
 	for i := startIdx; i < len(ranges); i++ {
@@ -518,11 +678,18 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 			}
 			start = rewindOffset(r.Start, startOff)
 		}
-		t := &boundedScanTarget{path: path, start: start, length: r.Start + r.Len - start}
+		var t scanTarget = &boundedScanTarget{path: path, start: start, length: r.Start + r.Len - start}
+		if shared != nil {
+			t = &sharedBoundedTarget{f: shared, path: path, start: start, length: r.Start + r.Len - start}
+		}
 		ropts := opts
 		ropts.Resume = false
 		if opts.CheckpointPath != "" {
 			ropts.rangeCtx = &rangeJournalCtx{ranges: ranges, index: i}
+			ropts.rangeProofs = acc
+		}
+		if i == startIdx && active != nil {
+			ropts.runResume = active
 		}
 		if err := runPipeline(t, ropts, onDetection, onProgress); err != nil {
 			return err
@@ -591,59 +758,154 @@ func ResumeRewindOffset(rangeStart, offset int64) int64 {
 	return rewindOffset(rangeStart, offset)
 }
 
-// readRangeResume loads and validates a range journal: path, exact range
-// list, index bounds, offset within the range. It returns the range index
-// and offset to continue from; resume=false means the journal records a
-// completed list. A missing journal starts over (like single-target
-// resume); anything corrupt or mismatched refuses loudly.
-func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (idx int, off int64, resume bool, err error) {
+// rangeResumePlan is a range journal's case awaiting verification:
+// which ranges claim completion, where the active range claims its
+// frontier, and the proofs that must authorize the skips.
+type rangeResumePlan struct {
+	// fresh means no journal: start over with no verification.
+	fresh bool
+	// complete means the journal claims the whole list done.
+	complete bool
+	startIdx int
+	startOff int64
+	ident    FileIdentity
+	proof    *PrefixProof
+	proofs   []RangeProof
+	covered  []string
+}
+
+// readRangeResume loads and validates a range journal: path, exact
+// range list, index bounds, offset within the range. Geometry and
+// shape problems refuse loudly. Trust is NOT decided here — the
+// driver verifies every claimed span on its pinned handle before
+// skipping anything, including completed lists.
+func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (*rangeResumePlan, error) {
 	cp, err := ReadCheckpoint(file)
 	if err != nil {
 		if os.IsNotExist(err) {
 			logLinef(log, "[checkpoint] No checkpoint at %s, starting from the beginning\n", file)
-			return 0, -1, true, nil
+			return &rangeResumePlan{fresh: true, startOff: -1}, nil
 		}
-		return 0, 0, false, err
+		return nil, err
 	}
 	if cp.Path != path {
-		return 0, 0, false, fmt.Errorf("checkpoint is for %s, not %s: refusing to resume", cp.Path, path)
+		return nil, fmt.Errorf("checkpoint is for %s, not %s: refusing to resume", cp.Path, path)
 	}
 	if len(cp.Ranges) == 0 {
-		return 0, 0, false, fmt.Errorf("checkpoint %s has no range list (single-target journal?): refusing to resume a range scan", file)
+		return nil, fmt.Errorf("checkpoint %s has no range list (single-target journal?): refusing to resume a range scan", file)
 	}
 	if firstDiff := firstRangeDiff(cp.Ranges, ranges); firstDiff >= 0 {
-		return 0, 0, false, fmt.Errorf("checkpoint range list does not match (first difference at range %d): the volume changed; refusing to resume", firstDiff)
+		return nil, fmt.Errorf("checkpoint range list does not match (first difference at range %d): the volume changed; refusing to resume", firstDiff)
 	}
 	if cp.RangeIndex > len(ranges) {
-		return 0, 0, false, fmt.Errorf("checkpoint range index %d beyond %d ranges: refusing to resume", cp.RangeIndex, len(ranges))
+		return nil, fmt.Errorf("checkpoint range index %d beyond %d ranges: refusing to resume", cp.RangeIndex, len(ranges))
 	}
+	plan := &rangeResumePlan{ident: cp.Ident, proof: cp.Proof, proofs: cp.RangeProofs, covered: cp.Covered}
 	if cp.RangeIndex == len(ranges) {
-		return 0, 0, false, nil
+		plan.complete = true
+		plan.startIdx = len(ranges)
+		return plan, nil
 	}
 	r := ranges[cp.RangeIndex]
 	if cp.Offset < r.Start || cp.Offset > r.Start+r.Len {
-		return 0, 0, false, fmt.Errorf("checkpoint offset %d outside range %d [%d,%d): refusing to resume",
+		return nil, fmt.Errorf("checkpoint offset %d outside range %d [%d,%d): refusing to resume",
 			cp.Offset, cp.RangeIndex, r.Start, r.Start+r.Len)
 	}
-	// The frontier is honored only when the current bytes still
-	// match the journaled identity — replaced bytes restart
-	// instead of skipping contents never read. (Volumes keep
-	// legacy trust: unattestable anywhere; see IdentityTrust.)
-	if trustOff, _, note := IdentityTrust(cp.Ident, path); !trustOff {
-		logLinef(log, "[checkpoint] WARNING: %s\n", note)
-		return 0, -1, true, nil
-	}
-	return cp.RangeIndex, cp.Offset, true, nil
+	plan.startIdx, plan.startOff = cp.RangeIndex, cp.Offset
+	return plan, nil
 }
 
-// pendingFrontier is a journal point: the root offset read so far
-// plus, for range scans, the range list and index. Mid-root points
-// are written only after a drain proves every byte at or before
-// them delivered; the root-end point travels to runPipeline,
-// which writes it on clean EOF. digest carries the cumulative
-// covered-bytes SHA-256 at the frontier, set only on the
-// completion point to pin the whole target for skips; mid-run
-// points leave it empty and resume re-covers from the offset.
+// verifyRangePlan verifies a resume plan on one pinned handle: the
+// cheap tier first, then every completed range's proof in order,
+// then the active range's proof. It returns the verified start
+// point, the accumulated completed proofs, and the active range's
+// adoption (nil when the active range rescans). The first
+// unverified range restarts the list there; a completed list that
+// verifies scans nothing. complete reports that outcome.
+func verifyRangePlan(log io.Writer, f *os.File, path string, ranges []FSExtent, plan *rangeResumePlan) (startIdx int, startOff int64, acc *rangeProofAcc, active *runResume, complete bool) {
+	acc = &rangeProofAcc{}
+	startIdx, startOff = plan.startIdx, plan.startOff
+	if plan.complete {
+		startIdx = len(ranges)
+	}
+	// Cheap tier on the handle's fstat: an obvious move skips
+	// every re-read and rescans.
+	fi, attested, attOK := FileIdentityOfFile(f)
+	if pass, note := cheapTierPass(plan.ident, fi, attested, attOK, path); !pass {
+		logLinef(log, "[checkpoint] WARNING: %s\n", note)
+		return 0, -1, acc, nil, false
+	}
+	// Completed ranges in order; zero-length ranges complete
+	// vacuously (no bytes to skip, no proof needed).
+	end := startIdx
+	if plan.complete {
+		end = len(ranges)
+	}
+	pi := 0
+	spans := make([][2]int64, 0, end+1)
+	for i := 0; i < end; i++ {
+		if ranges[i].Len <= 0 {
+			continue
+		}
+		if pi >= len(plan.proofs) || plan.proofs[pi].Index != i ||
+			plan.proofs[pi].Start != ranges[i].Start || plan.proofs[pi].Len != ranges[i].Len {
+			logLinef(log, "[checkpoint] WARNING: range %d of %s has no verified proof; rescanning from range %d\n", i, path, i)
+			return i, ranges[i].Start, acc, nil, false
+		}
+		if _, verr := verifySpan(f, ranges[i].Start, ranges[i].Len, plan.proofs[pi].SHA256); verr != nil {
+			logLinef(log, "[checkpoint] WARNING: range %d proof failed (%s); rescanning from range %d\n", i, verr.Error(), i)
+			return i, ranges[i].Start, acc, nil, false
+		}
+		acc.appendRangeProof(plan.proofs[pi])
+		spans = append(spans, [2]int64{ranges[i].Start, ranges[i].Start + ranges[i].Len})
+		pi++
+	}
+	if plan.complete {
+		return len(ranges), -1, acc, nil, true
+	}
+	// Active range: the proof must span [range start, frontier).
+	r := ranges[startIdx]
+	if plan.proof == nil {
+		logLinef(log, "[checkpoint] WARNING: journal for %s predates content proofs; rescanning range %d\n", path, startIdx)
+		return startIdx, r.Start, acc, nil, false
+	}
+	if plan.proof.Start != r.Start || plan.proof.Len < startOff-r.Start {
+		logLinef(log, "[checkpoint] WARNING: journal proof does not cover range %d's frontier; rescanning range %d\n", startIdx, startIdx)
+		return startIdx, r.Start, acc, nil, false
+	}
+	h, verr := verifySpan(f, plan.proof.Start, plan.proof.Len, plan.proof.SHA256)
+	if verr != nil {
+		logLinef(log, "[checkpoint] WARNING: range %d proof failed (%s); rescanning range %d\n", startIdx, verr.Error(), startIdx)
+		return startIdx, r.Start, acc, nil, false
+	}
+	proofEnd := plan.proof.Start + plan.proof.Len
+	spans = append(spans, [2]int64{plan.proof.Start, proofEnd})
+	// A point exactly at range end is a completed range in
+	// active clothing: the verified proof is its completion
+	// evidence, so file it as one.
+	if startOff >= r.Start+r.Len && proofEnd == r.Start+r.Len {
+		acc.appendRangeProof(RangeProof{Version: ProofVersion, Index: startIdx, Start: r.Start, Len: r.Len, SHA256: plan.proof.SHA256})
+	}
+	return startIdx, startOff, acc, &runResume{
+		spans:      spans,
+		digest:     h,
+		digestBase: r.Start,
+		digestLen:  proofEnd,
+		covered:    plan.covered,
+	}, false
+}
+
+// pendingFrontier is a journal point: the coverage offset read so
+// far plus, for range scans, the range list and index. Mid-root
+// points are written only after a drain proves every byte at or
+// before them delivered; the root-end point travels to
+// runPipeline, which writes it on clean EOF. digest carries the
+// cumulative covered-bytes SHA-256 at the frontier, set only on
+// the completion point to pin the whole target for skips; mid-run
+// points leave it empty. proof pins the exact bytes read (see
+// proof.go): it is byte identity, independent of the coverage
+// offset, so an error path may rewind the offset while the proof
+// still pins banked members' bytes.
 type pendingFrontier struct {
 	desc   string
 	offset int64
@@ -657,6 +919,10 @@ type pendingFrontier struct {
 	// ident attests the run-start bytes, copied from
 	// journalCtl.ident by writers holding jc.
 	ident FileIdentity
+	// proof pins the bytes read; rangeProofs (range scans only)
+	// pins completed ranges.
+	proof       *PrefixProof
+	rangeProofs []RangeProof
 }
 
 // batchDigest streams the root bytes of one batch scan for the
@@ -711,6 +977,15 @@ type pubGate struct {
 	// maps: stage publishers check them while scanBlocks banks.
 	coverMu sync.Mutex
 	covered map[string]bool
+	// live keeps the banked target behind each key so filing can
+	// resolve its depth-1 provenance extent (see
+	// snapshotCovered). Seeded keys have no live target.
+	live map[string]scanTarget
+	// seedSpan retains the verified span each seeded base key
+	// was kept under, so members deferred all run re-file with
+	// their seed-time provenance instead of being dropped (which
+	// would replay them every attempt and never converge).
+	seedSpan map[string][2]int64
 	// parentOf records every publish attempt's parent key, so a
 	// refusal can poison its ancestor chain: a banked parent
 	// whose child was refused must be re-read next run (its
@@ -731,24 +1006,51 @@ func newPubGate(log io.Writer) *pubGate {
 	return &pubGate{log: log}
 }
 
-// seedCovered loads banked members from the run-start journal.
-func (g *pubGate) seedCovered(keys []string) {
-	if g == nil || len(keys) == 0 {
-		return
+// seedCovered loads banked members from the run-start journal,
+// keeping only members whose provenance span sits inside the
+// verified spans; the rest re-read. It returns the kept base keys
+// and the dropped filed keys (no parseable provenance, or
+// provenance outside verified bytes) for warnings. Callers seed
+// only after the spans verify on the opened handle.
+func (g *pubGate) seedCovered(keys []string, spans [][2]int64) (kept, dropped []string) {
+	kept, dropped = filterCoveredBySpans(keys, spans)
+	if g == nil {
+		return kept, dropped
 	}
 	g.coverMu.Lock()
 	defer g.coverMu.Unlock()
+	if len(kept) == 0 {
+		return kept, dropped
+	}
 	if g.covered == nil {
 		g.covered = make(map[string]bool)
 	}
-	for _, k := range keys {
+	if g.seedSpan == nil {
+		g.seedSpan = make(map[string][2]int64)
+	}
+	for _, k := range kept {
 		g.covered[k] = true
 	}
+	// Retain each kept key's own filed span for re-filing (the
+	// span was verified this run, so re-filing it is sound; a
+	// later smaller proof just filters it again).
+	for _, k := range keys {
+		base, s, e, ok := coverProvenance(k)
+		if ok && g.covered[base] {
+			g.seedSpan[base] = [2]int64{s, e}
+		}
+	}
+	return kept, dropped
 }
 
-// bankCovered records a fully read nested target.
-func (g *pubGate) bankCovered(key string) {
-	if g == nil || key == "" {
+// bankCovered records a fully read nested target, keeping the live
+// target so filing can resolve its provenance extent.
+func (g *pubGate) bankCovered(t scanTarget) {
+	if g == nil || t == nil {
+		return
+	}
+	key := coverKeyOf(t)
+	if key == "" {
 		return
 	}
 	g.coverMu.Lock()
@@ -756,7 +1058,11 @@ func (g *pubGate) bankCovered(key string) {
 	if g.covered == nil {
 		g.covered = make(map[string]bool)
 	}
+	if g.live == nil {
+		g.live = make(map[string]scanTarget)
+	}
 	g.covered[key] = true
+	g.live[key] = t
 }
 
 func (g *pubGate) isCovered(key string) bool {
@@ -772,6 +1078,14 @@ func (g *pubGate) isCovered(key string) bool {
 // sorted for stable journals; nil when empty so journals stay
 // lean. Only subtree-complete members are filed: a banked parent
 // with a refused child is re-read next run instead of deferred.
+// Each filed key carries its depth-1 provenance span
+// (|rootext=A-B): the absolute stream bytes the member's content
+// derives from, resolved through the live source chain for fresh
+// reads and retained from seed time for members deferred all run
+// (their span verified this run, so re-filing it is sound).
+// Members whose span cannot be resolved (ancestor still reading
+// at a mid-run point, failed reads, unknown extents) are omitted
+// and re-read next run — the safe direction.
 func (g *pubGate) snapshotCovered() []string {
 	if g == nil {
 		return nil
@@ -780,12 +1094,93 @@ func (g *pubGate) snapshotCovered() []string {
 	defer g.coverMu.Unlock()
 	var out []string
 	for k := range g.covered {
-		if !g.poisoned[k] {
-			out = append(out, k)
+		if g.poisoned[k] {
+			continue
 		}
+		s, e, ok := g.provenanceLocked(k)
+		if !ok {
+			continue
+		}
+		out = append(out, fmt.Sprintf("%s%s%d-%d", k, rootExtSuffix, s, e))
 	}
 	sort.Strings(out)
 	return out
+}
+
+// provenanceLocked resolves the depth-1 provenance span for a
+// banked base key: every source-chain link must itself be banked
+// (a member read while its parent still streams resolves once the
+// parent banks — at the error path everything admitted has
+// settled, so resolution there is exact; mid-run omissions just
+// re-read). Deeper members inherit their depth-1 ancestor's span:
+// identical ancestor bytes inflate deterministically, so key match
+// plus proven ancestor bytes proves the member. Caller holds
+// coverMu.
+func (g *pubGate) provenanceLocked(key string) (start, end int64, ok bool) {
+	t, ok := g.live[key]
+	if !ok || t == nil {
+		// Seeded-only: re-file the seed-time span.
+		if sp, ok := g.seedSpan[key]; ok {
+			return sp[0], sp[1], true
+		}
+		return 0, 0, false
+	}
+	for {
+		if _, banked := g.covered[coverKeyOf(t)]; !banked {
+			return 0, 0, false
+		}
+		src, nested := sourceOf(t)
+		if !nested {
+			return 0, 0, false // roots are never banked
+		}
+		if src.Depth() == 0 {
+			return ownExtent(t)
+		}
+		t = src
+	}
+}
+
+// sourceOf returns the publishing parent of a nested target, or
+// false for roots. It switches the same types as parentKeyOf.
+func sourceOf(t scanTarget) (scanTarget, bool) {
+	switch v := t.(type) {
+	case *zipScanTarget:
+		return v.source, true
+	case *zipEntryTarget:
+		return v.source, true
+	case *gzipScanTarget:
+		return v.source, true
+	default:
+		return nil, false
+	}
+}
+
+// ownExtent returns the span a depth-1 member occupies in its
+// parent (root) stream: the full archive for zip members
+// (headers, member data, and central directory all sit inside),
+// the consumed compressed span for gzip members, the local
+// header through member data for recovery entries. Anything
+// unknown or impossible declines, and the member re-reads.
+func ownExtent(t scanTarget) (start, end int64, ok bool) {
+	switch v := t.(type) {
+	case *zipScanTarget:
+		if v.zipOffset < 0 || v.zipSize <= 0 {
+			return 0, 0, false
+		}
+		return v.zipOffset, v.zipOffset + v.zipSize, true
+	case *gzipScanTarget:
+		if v.gzipOffset < 0 || v.consumed <= 0 {
+			return 0, 0, false
+		}
+		return v.gzipOffset, v.gzipOffset + v.consumed, true
+	case *zipEntryTarget:
+		if v.headerOff < 0 || v.dataOff < v.headerOff || v.compSize <= 0 {
+			return 0, 0, false
+		}
+		return v.headerOff, v.dataOff + v.compSize, true
+	default:
+		return 0, 0, false
+	}
 }
 
 // coverKeyOf returns the banking identity for a target: the stable
@@ -987,88 +1382,80 @@ type journalCtl struct {
 	// one: the root ends once, so the send never blocks, and a
 	// clean-EOF return always finds it (sent before the EOF).
 	final chan *pendingFrontier
-	// digest streams the root bytes of a batch scan for the
-	// manifest digest. Non-nil only under a batch journal; a
-	// completion frontier from a zero start adopts its hex.
-	// Truncated or resumed coverage simply never verifies, so a
-	// skip falls back to a rescan, never to blind trust.
+	// digest streams the root bytes of every checkpointed scan
+	// for prefix proofs and (under a batch journal) the manifest
+	// digest. Resumed runs seed it with the verified prefix and
+	// skip re-read overlap, so its state is always the hash of
+	// [digestBase, digestLen), filed as the frontier proof.
 	digest *batchDigest
+	// digestBase is the absolute stream offset the digest
+	// started at: 0 for whole-file scans, the range start for
+	// range scans. digestLen is the absolute end hashed so far
+	// (the verified prefix end after adoption, then the scan
+	// frontier). digestSeedEnd marks hashed bytes the scan
+	// re-reads (resume overlap): reads below it are not fed
+	// twice.
+	digestBase    int64
+	digestLen     int64
+	digestSeedEnd int64
 	// ident attests the seed bytes once at run start; every
-	// frontier this run files carries it, so a resume can tell
-	// whether the current bytes are the journaled ones. Captured
-	// up front (not at write time) so bytes changing mid-run
-	// cannot bless their own stale progress.
+	// frontier this run files carries it for the cheap rejection
+	// tier. Captured up front (not at write time) so bytes
+	// changing mid-run cannot bless their own stale progress.
 	ident FileIdentity
+	// preopened is the run-start verified handle: when a journal
+	// claim verifies, runPipeline opens the seed once, verifies
+	// the proof on that handle, and hands it to the root read so
+	// verification and consumption share one handle. Nil when
+	// there is nothing to verify.
+	preopened TargetReader
+	// preIdent/preOK attest the root at open (run-start
+	// stability baseline); rootPost/postOK attest it at clean
+	// root end. runPipeline warns when they differ: the bytes
+	// moved under the scan.
+	preIdent FileIdentity
+	preOK    bool
+	rootPost FileIdentity
+	postOK   bool
+	// lastFiled remembers the last frontier this run journaled,
+	// so the error path freezes run-proven progress — never a
+	// stale journal-file offset (see frozenOffset).
+	lastFiled pendingFrontier
+	hasFiled  bool
+	// adopted reports that a verified prefix seeded this run's
+	// digest (adoptVerified ran). Fresh runs hash from their
+	// own start instead (an explicit -s start is an assertion,
+	// never a proven prefix).
+	adopted bool
 }
 
-// writeScanCheckpoint journals root-target progress: a range entry when
-// the pipeline runs inside ScanRangesWithOptions, a legacy entry
-// otherwise.
-// seedCoveredFromJournal loads a previous attempt's banked nested
-// members so this run defers them. A missing journal is a fresh
-// run, not an error. Seeding is identity-gated through
-// IdentityTrust: member keys embed the source path but not its
-// content, so replaced bytes re-read everything instead of
-// deferring members never read in the current content. Main
-// enforces the same rule for offsets when it resets batch entries
-// and single/range resumes; this covers direct detector callers.
-func seedCoveredFromJournal(gate *pubGate, opts Options, seed scanTarget) {
-	if opts.CheckpointPath == "" {
-		return
+// frozenOffset returns the journal point the error path must keep:
+// the last frontier this run filed when it advanced past the run
+// start, else the run start. It consults run state only, never the
+// journal file: after a refused claim the file still holds the old
+// run's offset, and filing that under the current identity would
+// launder stale progress.
+func (jc *journalCtl) frozenOffset(runStart int64) int64 {
+	if jc != nil && jc.hasFiled && jc.lastFiled.offset > runStart {
+		return jc.lastFiled.offset
 	}
-	cp, err := ReadCheckpoint(opts.CheckpointPath)
-	if err != nil {
-		return
-	}
-	if cp.IsBatch() {
-		for _, t := range cp.Targets {
-			if t.State != BatchActive {
-				continue
-			}
-			_, covered, note := IdentityTrust(t.Ident, t.Path)
-			if !covered {
-				if len(t.Covered) > 0 && note != "" {
-					opts.logf("[scan] WARNING: %s; banked members re-scanned\n", note)
-				}
-				continue
-			}
-			gate.seedCovered(t.Covered)
-		}
-		return
-	}
-	_, covered, note := IdentityTrust(cp.Ident, seed.Describe())
-	if !covered {
-		if len(cp.Covered) > 0 && note != "" {
-			opts.logf("[scan] WARNING: %s; banked members re-scanned\n", note)
-		}
-		return
-	}
-	gate.seedCovered(cp.Covered)
+	return runStart
 }
 
-// frozenResumeOffset returns the journaled point the error path must
-// keep: the filed offset when this run journaled one, else the run
-// start. Mid-run points only journal while skip-free, so the filed
-// point is proven; callers overwrite it with the same offset plus
-// the run's banked members (or rewind it on deferred skips).
-func frozenResumeOffset(opts Options, seed scanTarget) int64 {
-	start := seed.StartOffset()
-	cp, err := ReadCheckpoint(opts.CheckpointPath)
-	if err != nil {
-		return start
+// currentProof pins the bytes hashed so far this run: the span
+// [digestBase, digestLen) with the live digest state. Journal
+// points file it beside their (independently rewound) coverage
+// offset. A run that hashed nothing files an empty span, which
+// resumes refuse (proof shorter than any nonzero offset).
+func (jc *journalCtl) currentProof() *PrefixProof {
+	if jc == nil || jc.digest == nil {
+		return nil
 	}
-	if cp.IsBatch() {
-		for _, t := range cp.Targets {
-			if t.State == BatchActive && t.Offset > start {
-				return t.Offset
-			}
-		}
-		return start
+	l := jc.digestLen - jc.digestBase
+	if l < 0 {
+		l = 0
 	}
-	if cp.Offset > start {
-		return cp.Offset
-	}
-	return start
+	return &PrefixProof{Version: ProofVersion, Start: jc.digestBase, Len: l, SHA256: jc.digest.hex()}
 }
 
 // frontierFor builds the journal point for target read up to offset.
@@ -1103,9 +1490,11 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 				// Covered banking replaces wholesale: the
 				// gate's set only grows within a run, and a
 				// completion files nil (subsumed). Identity
-				// is the run-start attestation, likewise.
+				// is the run-start attestation, likewise,
+				// and the proof pins the bytes read.
 				tgts[i].Covered = p.covered
 				tgts[i].Ident = p.ident
+				tgts[i].Proof = p.proof
 			}
 		}
 		cp := Checkpoint{Offset: 0, Targets: tgts}
@@ -1120,10 +1509,10 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 		return
 	}
 	if p.ranges != nil {
-		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset, p.covered, p.ident)
+		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset, p.covered, p.ident, p.proof, p.rangeProofs)
 		return
 	}
-	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset, p.covered, p.ident)
+	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset, p.covered, p.ident, p.proof)
 }
 
 // firstRangeDiff returns the first index where two range lists differ, or
@@ -1138,6 +1527,126 @@ func firstRangeDiff(a, b []FSExtent) int {
 		}
 	}
 	return -1
+}
+
+// restartTarget rewinds a refused resume to the stream base while
+// keeping the seed's identity for nested describes and case logs.
+type restartTarget struct {
+	scanTarget
+	start int64
+}
+
+// StartOffset returns the rewound base.
+func (t *restartTarget) StartOffset() int64 { return t.start }
+
+// adoptResume verifies the journal's case for seed and adopts it,
+// or rewinds to the stream base. Range pipelines arrive
+// pre-verified (opts.runResume, proven on the shared handle);
+// whole-file pipelines preopen the seed once and run the cheap
+// tier plus proof verification on that handle, handing it to the
+// root read so verification and consumption cannot straddle a
+// swap. Only verified spans seed the digest and the covered set;
+// every refusal warns and rescans.
+func adoptResume(opts Options, seed scanTarget, jc *journalCtl, gate *pubGate) scanTarget {
+	if jc == nil {
+		return seed
+	}
+	if opts.runResume != nil {
+		adoptVerified(opts, seed, jc, gate, opts.runResume)
+		return seed
+	}
+	if opts.rangeCtx != nil {
+		return seed
+	}
+	runStart := seed.StartOffset()
+	claim, note, coveredN := loadResumeClaim(opts, seed, runStart)
+	if claim == nil {
+		if note != "" {
+			opts.logf("[checkpoint] WARNING: %s\n", note)
+			if coveredN > 0 {
+				opts.logf("[scan] WARNING: %d banked members re-scanned\n", coveredN)
+			}
+			if runStart > 0 && opts.Resume {
+				return &restartTarget{scanTarget: seed}
+			}
+		}
+		return seed
+	}
+	f, err := seed.Open()
+	if err != nil {
+		// The root read re-opens and fails honestly there;
+		// nothing is verified and nothing is honored.
+		return seed
+	}
+	// Open-then-fstat where the reader is a plain file; decoded
+	// readers (EWF, split sets) cheap-tier on the seed path
+	// instead — rejection only, so a weak tier just wastes a
+	// verification, while the proof streams decoded bytes from
+	// every segment.
+	var fi os.FileInfo
+	var attested FileIdentity
+	var attOK bool
+	if of, ok := f.(*os.File); ok {
+		fi, attested, attOK = FileIdentityOfFile(of)
+		jc.preIdent, jc.preOK = attested, attOK
+	} else if st, serr := os.Stat(seed.Describe()); serr == nil {
+		fi = st
+		attested, attOK = FileIdentityOf(seed.Describe())
+	}
+	if pass, tnote := cheapTierPass(claim.ident, fi, attested, attOK, seed.Describe()); !pass {
+		f.Close()
+		opts.logf("[checkpoint] WARNING: %s\n", tnote)
+		if len(claim.covered) > 0 {
+			opts.logf("[scan] WARNING: %d banked members re-scanned\n", len(claim.covered))
+		}
+		if runStart > 0 {
+			return &restartTarget{scanTarget: seed}
+		}
+		return seed
+	}
+	h, verr := verifySpan(f, claim.proof.Start, claim.proof.Len, claim.proof.SHA256)
+	if verr != nil {
+		f.Close()
+		opts.logf("[checkpoint] WARNING: journal proof failed (%s); rescanning from the start\n", verr.Error())
+		if len(claim.covered) > 0 {
+			opts.logf("[scan] WARNING: %d banked members re-scanned\n", len(claim.covered))
+		}
+		if runStart > 0 {
+			return &restartTarget{scanTarget: seed}
+		}
+		return seed
+	}
+	jc.preopened = f
+	adoptVerified(opts, seed, jc, gate, &runResume{
+		spans:      [][2]int64{{claim.proof.Start, claim.proof.Start + claim.proof.Len}},
+		digest:     h,
+		digestBase: claim.proof.Start,
+		digestLen:  claim.proof.Start + claim.proof.Len,
+		covered:    claim.covered,
+	})
+	return seed
+}
+
+// adoptVerified folds verified spans into the run: the digest
+// keeps streaming from the proven prefix (re-read overlap below
+// the verified end is not fed twice), and filed members filter
+// against the verified spans. Members outside verified bytes
+// re-read with a warning.
+func adoptVerified(opts Options, seed scanTarget, jc *journalCtl, gate *pubGate, rr *runResume) {
+	jc.adopted = true
+	if rr.digest != nil {
+		jc.digest.h = rr.digest
+	}
+	jc.digestBase = rr.digestBase
+	jc.digestLen = rr.digestLen
+	jc.digestSeedEnd = rr.digestLen
+	if len(rr.covered) == 0 {
+		return
+	}
+	_, dropped := gate.seedCovered(rr.covered, rr.spans)
+	if len(dropped) > 0 {
+		opts.logf("[scan] WARNING: %s: %d banked members outside verified bytes re-scanned\n", seed.Describe(), len(dropped))
+	}
 }
 
 // runPipeline runs one scan target through the full detection pipeline.
@@ -1223,15 +1732,29 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 			},
 			final: make(chan *pendingFrontier, 1),
 		}
-		if opts.BatchJournal != nil {
-			jc.digest = newBatchDigest()
+		// Every checkpointed scan streams its root bytes: the
+		// digest state files each frontier's content proof.
+		jc.digest = newBatchDigest()
+		if opts.rangeCtx != nil {
+			jc.digestBase = opts.rangeCtx.ranges[opts.rangeCtx.index].Start
 		}
+		jc.digestLen = jc.digestBase
 		if ident, ok := FileIdentityOf(seed.Describe()); ok {
 			jc.ident = ident
 		}
 	}
 	gate := newPubGate(opts.logWriter())
-	seedCoveredFromJournal(gate, opts, seed)
+	// Resume claims verify here, on one handle shared with the
+	// root read — never on metadata alone, never on a second
+	// open. A refused claim rewinds to the stream base.
+	seed = adoptResume(opts, seed, jc, gate)
+	if jc != nil && !jc.adopted && opts.rangeCtx == nil {
+		// Fresh whole-file run: the digest hashes from this
+		// run's own start, so an explicit -s skip files a
+		// span proof no resume honors (assertion, not proof).
+		jc.digestBase = seed.StartOffset()
+		jc.digestLen = seed.StartOffset()
+	}
 	defer func() {
 		if n := gate.skippedCount(); n > 0 {
 			opts.logf("[scan] WARNING: skipped %d nested archives past the %d publication cap; coverage is incomplete\n", n, maxOutstandingPubs)
@@ -1293,6 +1816,15 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 				return fmt.Errorf("case log: %w", err)
 			}
 		}
+		if jc != nil && jc.preOK && jc.postOK && !jc.preIdent.Matches(jc.rootPost) {
+			// The source moved under the scan: output may mix
+			// bytes from both sides of the change. The filed
+			// proof pins the mixed bytes, so the next resume
+			// re-verifies and rescans instead of trusting
+			// them — this run stays warn-and-continue so
+			// live logs still scan.
+			opts.logf("[scan] WARNING: %s changed during the scan; output may mix bytes (resume re-verifies)\n", seed.Describe())
+		}
 		if signal == io.EOF {
 			// Clean EOF proves every byte delivered (final-EOF
 			// forwarding implies every published target was
@@ -1315,7 +1847,15 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 		if jc != nil {
 			// Banked members must survive the error return or
 			// the next attempt replays them: file the covered
-			// snapshot at the frozen point. A deferred flush
+			// snapshot at the frozen point. The frozen offset
+			// comes from run state only (last filed point,
+			// else run start): the journal file may still
+			// hold a previous run's refused offset, which
+			// must never re-file under this run's identity.
+			// The proof is independent of the coverage
+			// offset — it pins every byte hashed this run,
+			// so banked members from proven bytes survive
+			// even a rewound offset. A deferred flush
 			// refusal additionally rewinds the offset to the
 			// run start, because it poisons every mid-run
 			// point (recovery candidates publish at root
@@ -1325,12 +1865,14 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 			// inside the microseconds between the flush and
 			// this write still strands — inherent to any
 			// end-of-run journaling.
-			ep := frontierFor(opts, seed, frozenResumeOffset(opts, seed))
+			ep := frontierFor(opts, seed, jc.frozenOffset(seed.StartOffset()))
 			if gate.deferredSkipped.Load() {
 				ep.offset = seed.StartOffset()
 			}
 			ep.covered = gate.snapshotCovered()
 			ep.ident = jc.ident
+			ep.proof = jc.currentProof()
+			ep.rangeProofs = opts.rangeProofs.snapshot()
 			writeFrontier(opts, ep)
 		}
 		return signal
@@ -1369,7 +1911,7 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 			// Banked only once fully read: coverKeyOf() is
 			// stable across resumes of the same input, so
 			// the key re-identifies this member next run.
-			gate.bankCovered(coverKeyOf(target))
+			gate.bankCovered(target)
 		}
 		if isRoot && opts.strictRoot {
 			// The root promised bytes but yielded none (vanished
@@ -1386,14 +1928,22 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		if isRoot && jc != nil && outcome.opened {
 			// The completion frontier supersedes any 1MB point;
 			// runPipeline writes it on clean EOF, when delivery
-			// is proven. A clean full pass from zero also
-			// certifies the covered-bytes digest, so a later
-			// skip can re-hash instead of trusting metadata.
+			// is proven. A clean full span — fresh from the
+			// base, or resumed with a verified prefix chaining
+			// the whole span — also certifies the
+			// covered-bytes digest, so a later skip can
+			// re-hash instead of trusting metadata.
 			ff := frontierFor(opts, target, outcome.end)
-			if jc.digest != nil && target.StartOffset() == 0 {
+			if jc.digest != nil && jc.digestBase == 0 && (target.StartOffset() == 0 || jc.digestSeedEnd > 0) {
 				ff.digest = jc.digest.hex()
 			}
 			ff.ident = jc.ident
+			ff.proof = jc.currentProof()
+			if opts.rangeCtx != nil && opts.rangeProofs != nil {
+				r := opts.rangeCtx.ranges[opts.rangeCtx.index]
+				opts.rangeProofs.appendRangeProof(RangeProof{Version: ProofVersion, Index: opts.rangeCtx.index, Start: r.Start, Len: r.Len, SHA256: jc.digest.hex()})
+			}
+			ff.rangeProofs = opts.rangeProofs.snapshot()
 			jc.final <- ff
 		}
 	}
@@ -1467,7 +2017,13 @@ func readTarget(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		outcome.expected = totalBytes - target.StartOffset()
 	}
 
-	if f, err = target.Open(); err != nil {
+	if isRoot && jc != nil && jc.preopened != nil {
+		// Verified at run start on this handle: verification
+		// and consumption share it, so no swap can land
+		// between the proof check and the scan.
+		f = jc.preopened
+		jc.preopened = nil
+	} else if f, err = target.Open(); err != nil {
 		opts.logf("[scan] Unable to scan target: %s\n", err.Error())
 		if strict {
 			outcome.rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
@@ -1475,6 +2031,14 @@ func readTarget(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		return outcome, pushEOF()
 	}
 	outcome.opened = true
+	if isRoot && jc != nil && !jc.preOK {
+		// No verified preopen (fresh run): baseline run-start
+		// stability at open for the end-of-run check.
+		if of, ok := f.(*os.File); ok {
+			_, att, attOK := FileIdentityOfFile(of)
+			jc.preIdent, jc.preOK = att, attOK
+		}
+	}
 
 	if _, err = f.Seek(target.StartOffset(), 0); err != nil {
 		opts.logf("[scan] Unable to scan target: %s\n", err.Error())
@@ -1562,8 +2126,21 @@ readLoop:
 			opts.caseRec.hash(block.data[prefix : prefix+read])
 		}
 		if jc != nil && jc.digest != nil && isRoot {
-			// Manifest digest over the same covered bytes.
-			jc.digest.write(block.data[prefix : prefix+read])
+			// Proof digest over the same covered bytes,
+			// skipping re-read resume overlap below the
+			// verified end (already hashed) so the state
+			// stays the hash of [digestBase, digestLen).
+			skip := int64(0)
+			if jc.digestSeedEnd > currentOffset {
+				skip = jc.digestSeedEnd - currentOffset
+				if skip > int64(read) {
+					skip = int64(read)
+				}
+			}
+			jc.digest.write(block.data[prefix+int(skip) : prefix+read])
+			if end := currentOffset + int64(read); end > jc.digestLen {
+				jc.digestLen = end
+			}
 		}
 		block.final = isCleanEnd(err)
 		block.location = fmt.Sprintf("%s in %dkB block at byte offset %d", target.Describe(), blockSize/1024, currentOffset)
@@ -1623,6 +2200,22 @@ readLoop:
 		}
 	}
 	outcome.end = currentOffset
+	if gt, ok := target.(*gzipScanTarget); ok {
+		// Stamp the consumed compressed span for the banked
+		// provenance extent (exact bytes read, even on short
+		// reads — the member's hits derive from these).
+		if cc, ok := f.(interface{ compressedConsumed() int64 }); ok {
+			gt.consumed = cc.compressedConsumed()
+		}
+	}
+	if isRoot && jc != nil {
+		// End-of-run stability point for the mutation check.
+		if of, ok := f.(*os.File); ok {
+			if _, att, attOK := FileIdentityOfFile(of); attOK {
+				jc.rootPost, jc.postOK = att, true
+			}
+		}
+	}
 	return outcome, pushEOF()
 }
 
@@ -1657,7 +2250,7 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 					return false
 				}
 				if nestedOutcome.opened {
-					gate.bankCovered(coverKeyOf(nested))
+					gate.bankCovered(nested)
 				}
 			default:
 				drained = true
@@ -1681,7 +2274,11 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 			fp := frontierFor(opts, root, offset)
 			fp.covered = gate.snapshotCovered()
 			fp.ident = jc.ident
+			fp.proof = jc.currentProof()
+			fp.rangeProofs = opts.rangeProofs.snapshot()
 			writeFrontier(opts, fp)
+			jc.lastFiled = *fp
+			jc.hasFiled = true
 		}
 		// A skip counted by now poisons this frontier: some
 		// nested work from already-read root bytes was

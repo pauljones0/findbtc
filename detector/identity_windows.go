@@ -9,8 +9,9 @@ import (
 // volume serial + file index + size + write + creation times, all
 // in 100ns ticks. New-file swaps always change the index and
 // creation time, including timestamp-preserving copies. Residual
-// (documented in identity.go): deliberate in-place same-size
-// overwrite plus explicit mtime restore is invisible here.
+// (documented in identity.go, closed by proof verification):
+// deliberate in-place same-size overwrite plus explicit mtime
+// restore is invisible here.
 func fileIdentityStat(path string, fi os.FileInfo) (FileIdentity, bool) {
 	_ = fi
 	f, err := os.Open(path)
@@ -18,6 +19,14 @@ func fileIdentityStat(path string, fi os.FileInfo) (FileIdentity, bool) {
 		return FileIdentity{}, false
 	}
 	defer f.Close()
+	return fileIdentityFile(f, fi)
+}
+
+// fileIdentityFile attests an opened handle directly, without a
+// second open: the rejection tier describes the bytes about to be
+// consumed.
+func fileIdentityFile(f *os.File, fi os.FileInfo) (FileIdentity, bool) {
+	_ = fi
 	var info syscall.ByHandleFileInformation
 	if err := syscall.GetFileInformationByHandle(syscall.Handle(f.Fd()), &info); err != nil {
 		return FileIdentity{}, false

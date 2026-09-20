@@ -10,3 +10,8 @@ import "os"
 func fileIdentityStat(path string, fi os.FileInfo) (FileIdentity, bool) {
 	return FileIdentity{}, false
 }
+
+// fileIdentityFile on unattested platforms always declines.
+func fileIdentityFile(f *os.File, fi os.FileInfo) (FileIdentity, bool) {
+	return FileIdentity{}, false
+}

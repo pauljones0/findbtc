@@ -107,6 +107,31 @@ func (r *clampedReader) Seek(off int64, whence int) (int64, error) {
 
 func (r *clampedReader) Close() error { return r.f.Close() }
 
+// sharedBoundedTarget reads one range through a driver-held shared
+// handle (pinned for verification plus every range pipeline of a
+// resume) instead of opening the path per range.
+type sharedBoundedTarget struct {
+	f             *os.File
+	path          string
+	start, length int64
+}
+
+func (t *sharedBoundedTarget) Describe() string     { return t.path }
+func (t *sharedBoundedTarget) StartOffset() int64   { return t.start }
+func (t *sharedBoundedTarget) Depth() int           { return 0 }
+func (t *sharedBoundedTarget) Size() (int64, error) { return t.start + t.length, nil }
+func (t *sharedBoundedTarget) Open() (TargetReader, error) {
+	return &sharedClampedReader{clampedReader{f: t.f, start: t.start, end: t.start + t.length, pos: t.start}}, nil
+}
+
+// sharedClampedReader is a clampedReader that never closes the
+// shared handle; the driver owns its lifetime.
+type sharedClampedReader struct {
+	clampedReader
+}
+
+func (r *sharedClampedReader) Close() error { return nil }
+
 // mergeExtents sorts ranges by start and merges adjacent or overlapping
 // ones. Zero-length ranges are dropped.
 func mergeExtents(in []FSExtent) []FSExtent {

@@ -114,8 +114,8 @@ func TestPubGateTripsEndToEnd(t *testing.T) {
 // record anything.
 func TestPubGateBankingNilSafe(t *testing.T) {
 	var g *pubGate
-	g.seedCovered([]string{"a"})
-	g.bankCovered("a")
+	g.seedCovered([]string{"a"}, nil)
+	g.bankCovered(&zipScanTarget{source: &fileScanTarget{path: "x"}, fileIndex: 1, zipSize: 9})
 	if g.isCovered("a") {
 		t.Error("nil gate reports coverage")
 	}
@@ -149,7 +149,7 @@ func TestPubGatePolicySkipPoisonsFiled(t *testing.T) {
 		t.Fatal("parent publish refused")
 	}
 	<-ch
-	g.bankCovered(coverKeyOf(mid))
+	g.bankCovered(mid)
 	if got := g.snapshotCovered(); len(got) != 1 {
 		t.Fatalf("filed before policy skip = %v, want [parent]", got)
 	}
@@ -185,7 +185,7 @@ func TestPubGateCoverKeyDiscriminatesViews(t *testing.T) {
 	// End to end at the gate: banking one view must not defer
 	// the other, but must defer itself.
 	g := newPubGate(io.Discard)
-	g.bankCovered(coverKeyOf(mkZip(1000)))
+	g.bankCovered(mkZip(1000))
 	ch := make(chan scanTarget, 4)
 	if !gatePublish(g, ch, mkZip(900)) {
 		t.Error("different-size view deferred by banked key (would lose bytes)")
@@ -194,7 +194,7 @@ func TestPubGateCoverKeyDiscriminatesViews(t *testing.T) {
 	if gatePublish(g, ch, mkZip(1000)) {
 		t.Error("identical view admitted despite banked key (would duplicate)")
 	}
-	g.bankCovered(coverKeyOf(mkEntry(50, 8)))
+	g.bankCovered(mkEntry(50, 8))
 	if !gatePublishFlush(g, ch, mkEntry(40, 8)) {
 		t.Error("different-length recovery entry deferred by banked key")
 	}

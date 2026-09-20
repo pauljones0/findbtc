@@ -20,3 +20,10 @@ func fileIdentityStat(path string, fi os.FileInfo) (FileIdentity, bool) {
 		CtimeNS: st.Ctim.Nano(),
 	}, true
 }
+
+// fileIdentityFile attests an opened handle; posix needs only the
+// fstat, so this shares the path-based conversion.
+func fileIdentityFile(f *os.File, fi os.FileInfo) (FileIdentity, bool) {
+	_ = f
+	return fileIdentityStat("", fi)
+}

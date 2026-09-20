@@ -89,21 +89,46 @@ Resume refuses loudly when the journal does not match the run:
 a different target list or order, different profile / carve /
 JSON / reveal / baseline / case-log options, a legacy or range
 journal, or a corrupt file. Every resume decision is authorized
-by a kernel-attested content identity (device, inode, size,
-modification and change timestamps) captured at run start and
-filed in the journal: a skip or offset resume proceeds only on
-an exact identity match, and anything else — a same-size
+by a versioned content proof, not by metadata: each journal
+point files a SHA-256 over the exact bytes read (the root
+prefix for whole-file frontiers, the range span for active
+range frontiers, the full span for completed ranges and
+targets), and the next run re-reads and re-hashes that span on
+the same handle it then scans before honoring the offset, the
+skip, or any banked member. Anything else — a same-size
 replacement, a touched-up timestamp, a changed-middle rewrite,
-or a journal from an older binary that never recorded identity
-— rescans the target from the start with a warning. Raw volumes
-and pipes, which have no content identity, keep offset trust
-with their banked-member set dropped (their omission resumes are
-pure rewinding). A batch journal opened by an old binary falls
-back to a full rescan rather than skipping bytes. The one
-residual: Windows reports no change timestamp, so an in-place
-same-size rewrite with a restored timestamp still skips there —
-re-image or rescan evidence that may have been tampered with in
-place on Windows.
+a remapped device, a swapped EWF/split segment, or a journal
+from an older binary that never recorded proofs — rescans from
+the start with a warning. (A new journal opened by an old binary
+degrades to that binary's own rules — digest re-hash where the
+journal carries a digest, metadata otherwise — so upgrade the
+binary, not the journal.) Metadata (device, inode, size,
+timestamps) is only a cheap rejection tier that skips the
+re-read when the bytes obviously moved; a metadata match alone
+authorizes nothing, so weak-metadata shapes (Windows in-place
+rewrites with restored timestamps, coarse-clock filesystems,
+stale NFS attributes) all fail closed at the proof. Banked
+nested members additionally carry the archive span they derive
+from and are kept only inside verified bytes, so a prefix proof
+never blesses members outside it. Explicit `-s` starts are
+caller assertions, never proven bytes: their journals file span
+proofs a later `-resume` refuses, rescanning from zero.
+
+The honest price is re-reads: a resume sequentially re-hashes
+the bytes it skips (no detection work, usually page-cache hot),
+completed-target skips re-hash the full stream, and range
+resumes re-verify every completed range. Budget roughly one
+extra sequential pass over skipped bytes — measured on this
+machine: re-verifying a 256 MiB prefix takes ~2 s (page-cache
+hot) against a ~39 s full scan. Two contracts remain
+with the operator: quiesce writers during scans (a concurrent
+write is detected and warned — completed skips check stability
+before and after the re-hash — but exact concurrent guarantees
+need a snapshot or write exclusion the tool does not claim),
+and re-image evidence whose bytes may have changed on a medium
+that cannot be re-read identically (failing media: resume
+re-reads fault the same way the scan did, so finish bad-media
+scans in one run when possible).
 
 A congested run — more nested archives in flight than the
 publication cap admits — drains what it admitted and then fails

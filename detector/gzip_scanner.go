@@ -15,6 +15,15 @@ var GZIP_HEADER = []byte{0x1f, 0x8b}
 type gzipScanTarget struct {
 	source     scanTarget
 	gzipOffset int64
+	// consumed counts compressed parent-stream bytes read while
+	// inflating this member, stamped at read completion. It
+	// bounds the member's provenance span
+	// ([gzipOffset, gzipOffset+consumed]); zero means unread.
+	// The count may include small reader readahead past the
+	// member end — a safe over-approximation: the span only
+	// ever grows the verified-bytes requirement, so members
+	// re-read more often, never over less-proven bytes.
+	consumed int64
 }
 
 func (t *gzipScanTarget) Describe() string {
@@ -40,18 +49,43 @@ func (t *gzipScanTarget) Open() (TargetReader, error) {
 		return nil, err
 	}
 
-	reader, err := gzip.NewReader(f)
+	// Count compressed bytes through the member so the banked
+	// provenance span is exact, not the whole parent stream.
+	counted := &gzipCountReader{r: f}
+	reader, err := gzip.NewReader(counted)
 	if err != nil {
 		f.Close()
 		return nil, err
 	}
 
-	return &gzipTargetReader{reader, f}, nil
+	return &gzipTargetReader{reader, f, counted}, nil
+}
+
+// gzipCountReader counts bytes read from its wrapped reader.
+type gzipCountReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *gzipCountReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 type gzipTargetReader struct {
-	r  *gzip.Reader
-	fc io.Closer
+	r       *gzip.Reader
+	fc      io.Closer
+	counted *gzipCountReader
+}
+
+// compressedConsumed reports parent-stream bytes consumed by the
+// member read so far.
+func (r *gzipTargetReader) compressedConsumed() int64 {
+	if r.counted == nil {
+		return 0
+	}
+	return r.counted.n
 }
 
 func (r *gzipTargetReader) ReadAt(p []byte, off int64) (n int, err error) {

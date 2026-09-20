@@ -30,27 +30,35 @@ type Checkpoint struct {
 	Run     *BatchRun     `json:"run,omitempty"`
 	// Covered banks nested targets fully read in congested runs
 	// (G42b): each entry is the member's cover key (Describe plus
-	// size discriminators), stable across resume attempts of the
-	// same input. A retry defers
-	// re-publishing banked members, so same-cap attempts converge
-	// instead of replaying the same admitted prefix. Completion
-	// drops the list (it subsumes it). Opaque to old binaries.
+	// size discriminators) with a |rootext=A-B provenance span
+	// naming the absolute stream bytes the member derives from.
+	// A retry defers re-publishing banked members, so same-cap
+	// attempts converge instead of replaying the same admitted
+	// prefix. Completion drops the list (it subsumes it). Opaque
+	// to old binaries, whose plain keys never match and re-cover.
 	Covered []string `json:"covered,omitempty"`
 	// Size and Mtime identify the bytes the journaled progress —
-	// including Covered — was produced from. A retry seeds
-	// covered members only on identity match; replaced bytes
-	// re-read everything (a same-path swap keeps member keys but
-	// changes their content). Zero/absent on journals from older
-	// binaries, which never match and simply re-cover.
+	// including Covered — was produced from. They are cheap
+	// human-readable checks only; reuse is authorized by Proof,
+	// never by these. Zero/absent on journals from older
+	// binaries.
 	Size  int64 `json:"size,omitempty"`
 	Mtime int64 `json:"mtime,omitempty"`
 	// Ident is the kernel-attested run-start identity (device /
-	// inode / size / mtime / ctime) the Size/Mtime pair alone
-	// cannot prove: same-size rewrites with restored mtimes
-	// match metadata but change bytes. Matching uses Ident only;
-	// Size/Mtime stay as cheap human-readable checks. Absent on
-	// older journals, which never match and rescan.
+	// inode / size / mtime / ctime): the cheap rejection tier in
+	// front of Proof. Absent on older journals, which rescan.
 	Ident FileIdentity `json:"identity,omitempty"`
+	// Proof pins the exact bytes the journaled Offset and
+	// Covered were produced from (see proof.go): the frontier is
+	// honored only after the span re-reads and hashes equal on
+	// the opened handle. Absent on journals from older binaries
+	// and on runs that never read a provable prefix (explicit -s
+	// skips); both rescan.
+	Proof *PrefixProof `json:"proof,omitempty"`
+	// RangeProofs pins each completed range of a range-scan
+	// journal; resume re-verifies every one before skipping it.
+	// Absent on journals from older binaries, which rescan.
+	RangeProofs []RangeProof `json:"range_proofs,omitempty"`
 }
 
 // Batch target states: pending (never started), active (in flight,
@@ -80,9 +88,12 @@ type BatchTarget struct {
 	// filed list like Offset/SHA256 and never invents one.
 	Covered []string `json:"covered,omitempty"`
 	// Ident attests the run-start bytes Offset/Covered describe;
-	// see Checkpoint.Ident. Resume honors filed progress only on
-	// identity match.
+	// see Checkpoint.Ident: the cheap rejection tier only.
 	Ident FileIdentity `json:"identity,omitempty"`
+	// Proof pins the exact bytes Offset/Covered were produced
+	// from; see Checkpoint.Proof. Resume honors filed progress
+	// only after this span re-verifies on the opened handle.
+	Proof *PrefixProof `json:"proof,omitempty"`
 }
 
 // BatchRun binds the run options progress was produced under.
@@ -111,45 +122,35 @@ const checkpointBlockInterval = 256
 // Journal failures warn; they must never fail the scan itself. ident is
 // the RUN-START identity: filing write-time identity would bless stale
 // progress when bytes change mid-run, so callers capture it once up
-// front and file it at every point.
-func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string, ident FileIdentity) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident})
+// front and file it at every point. proof pins the bytes read (see
+// proof.go); nil files an unprovable point, which resumes rescan.
+func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string, ident FileIdentity, proof *PrefixProof) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident, Proof: proof})
 }
 
 // writeCheckpointRange atomically records range-scan progress: ranges is
 // the full range list (for resume validation), index the range in flight,
-// offset the absolute file offset scanned up to within it.
-func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string, ident FileIdentity) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident})
+// offset the absolute file offset scanned up to within it. proof pins
+// the active range's proven span; rangeProofs pins completed ranges.
+func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string, ident FileIdentity, proof *PrefixProof, rangeProofs []RangeProof) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident, Proof: proof, RangeProofs: rangeProofs})
 }
 
-// IdentityTrust decides whether filed journal progress (a frontier
-// offset, a covered set) may be honored for path. Regular files
-// with exact identity match honor both; replaced bytes rescan
-// both, with a note for warnings. Non-regular targets (volumes,
-// pipes) keep legacy offset trust — no platform can attest their
-// bytes, and refusing would end resume for raw media — while
-// dropping covered sets, which re-reading re-covers. Missing
-// files rescan so the open fails honestly instead of skipping.
-// Legacy journals (empty identity) rescan once on upgrade.
-func IdentityTrust(filed FileIdentity, path string) (offset, covered bool, note string) {
+// CheapTierReject is the path-based form of the metadata rejection
+// tier for callers without an opened handle (main's resume intent).
+// It reports whether filed journal progress is already disproven
+// for path; false means NOT-YET-REJECTED, never authorized — the
+// detector still verifies the content proof on its own handle
+// before honoring anything. Open-then-fstat inside the detector
+// re-checks authoritatively.
+func CheapTierReject(filed FileIdentity, path string) (reject bool, note string) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return false, false, "cannot stat " + path + "; rescanning from the start"
-	}
-	if !fi.Mode().IsRegular() {
-		return true, false, ""
+		return true, "cannot stat " + path + "; rescanning from the start"
 	}
 	cur, ok := FileIdentityOf(path)
-	if !ok {
-		// Regular file on an unattested platform: sound
-		// refusal (full rescan), outside the CI matrix.
-		return false, false, "no byte identity available for " + path + "; rescanning from the start"
-	}
-	if filed.Matches(cur) {
-		return true, true, ""
-	}
-	return false, false, "journal identity for " + path + " does not match current bytes; rescanning from the start"
+	pass, note := cheapTierPass(filed, fi, cur, ok, path)
+	return !pass, note
 }
 
 func writeCheckpointData(log io.Writer, file string, cp Checkpoint) {
@@ -184,9 +185,17 @@ func ReadCheckpoint(file string) (Checkpoint, error) {
 	if cp.Path == "" || cp.Offset < 0 || cp.RangeIndex < 0 {
 		return cp, fmt.Errorf("bad checkpoint %s: missing path or negative offset", file)
 	}
+	if cp.Proof != nil && !validPrefixProof(cp.Proof) {
+		return cp, fmt.Errorf("bad checkpoint %s: malformed content proof", file)
+	}
 	for i, r := range cp.Ranges {
 		if r.Start < 0 || r.Len <= 0 {
 			return cp, fmt.Errorf("bad checkpoint %s: range %d has non-positive geometry", file, i)
+		}
+	}
+	for i, p := range cp.RangeProofs {
+		if !validRangeProof(p) {
+			return cp, fmt.Errorf("bad checkpoint %s: range proof %d is malformed", file, i)
 		}
 	}
 	if err := validateBatchTargets(file, cp.Targets); err != nil {
@@ -220,6 +229,9 @@ func validateBatchTargets(file string, targets []BatchTarget) error {
 		}
 		if t.SHA256 != "" && !isHexDigest(t.SHA256) {
 			return fmt.Errorf("bad checkpoint %s: target %d has a malformed digest", file, i)
+		}
+		if t.Proof != nil && !validPrefixProof(t.Proof) {
+			return fmt.Errorf("bad checkpoint %s: target %d has a malformed content proof", file, i)
 		}
 	}
 	if active > 1 {

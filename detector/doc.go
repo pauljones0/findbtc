@@ -62,8 +62,15 @@
 //   - startOffset comes first in ScanWithOptions for historical
 //     reasons.
 //   - Single-target resume is caller-driven: ReadCheckpoint, then pass
-//     the journal offset back as startOffset. Range scans resume
-//     inside the detector via Options.Resume.
+//     the journal offset back as startOffset (exact, or rewound to
+//     the block grid for needles straddling the journal point —
+//     the CLI rewinds). The detector verifies the journaled
+//     content proof on its own handle before honoring the offset;
+//     refused claims restart at zero with a warning. A start that
+//     continues no journal point is taken as an explicit caller
+//     assertion — except under Options.Resume, which warns and
+//     restarts instead. Range scans resume inside the detector
+//     via Options.Resume.
 //   - Progress callbacks fire often; keep them cheap or pass nil.
 //   - Detection.Target for archive members names the member stream
 //     ("Zipfile #0 @ byte 0 in [...]"), not a filesystem path.

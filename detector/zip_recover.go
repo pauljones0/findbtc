@@ -30,6 +30,7 @@ const (
 // zipCandidate is one validated local file header awaiting flush.
 type zipCandidate struct {
 	source     scanTarget
+	headerOff  int64
 	dataOff    int64
 	compSize   int64
 	uncompSize int64
@@ -93,6 +94,7 @@ func parseZipCandidate(source scanTarget, data []byte, hdrAbs, dataAbs int64, da
 	}
 	return zipCandidate{
 		source:     source,
+		headerOff:  hdrAbs,
 		dataOff:    hdrAbs + 30 + int64(nameLen) + int64(extraLen),
 		compSize:   int64(compSize),
 		uncompSize: int64(uncompSize),
@@ -146,6 +148,7 @@ func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTarg
 		if !gatePublishFlush(gate, scanTargets, &zipEntryTarget{
 			source:     c.source,
 			name:       c.name,
+			headerOff:  c.headerOff,
 			dataOff:    c.dataOff,
 			compSize:   c.compSize,
 			uncompSize: c.uncompSize,
@@ -163,6 +166,7 @@ func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTarg
 type zipEntryTarget struct {
 	source     scanTarget
 	name       string
+	headerOff  int64
 	dataOff    int64
 	compSize   int64
 	uncompSize int64
