@@ -48,13 +48,13 @@ completely solve the pain point?"**
 | 27 | Guided mode (-advise) | complete | 938d490 |
 | 28 | Embedding pass (quiet + cancel) | complete | e256cf6 |
 | 29 | Baseline/allowlist for repeat sweeps | complete | 1e36005 |
-| 30 | Offline secret verification | complete | - |
-| 31 | Coverage honesty (exit codes + skipped accounting) | complete | - |
-| 32 | Offline seed completion (1–2 missing words) | complete | - |
-| 33 | Password handoff verified vs real tools | queued | - |
-| 34 | ETA + progress honesty for long scans | queued | - |
-| 35 | Stdin scanning (pipe-first flows) | queued | - |
-| 36 | Git-history secrets via pipes | queued | - |
+| 30 | Offline secret verification | complete | 08574bb |
+| 31 | Coverage honesty (exit codes + skipped accounting) | complete | a132b7b |
+| 32 | Offline seed completion (1–2 missing words) | complete | a132b7b |
+| 33 | Password handoff verified vs real tools | complete | a132b7b |
+| 34 | ETA + progress honesty for long scans | complete | 1eeb861 |
+| 35 | Stdin scanning (pipe-first flows) | complete | 71eb324 |
+| 36 | Git-history secrets via pipes | complete | a5d9355 |
 | 37 | Homebrew tap + Windows managers | queued | - |
 | 38 | Multi-target scans + unified report | queued | - |
 | 39 | Completions + man page | queued | - |
