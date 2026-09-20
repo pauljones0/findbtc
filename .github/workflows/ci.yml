@@ -7,6 +7,10 @@ on:
 jobs:
   test:
     strategy:
+      # TEMPORARY (Goal 40 diagnosis): show every platform failure in
+      # one run instead of fail-fast cancelling the matrix. Revert
+      # once the matrix is green.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         go-version: [stable, oldstable]
@@ -76,7 +80,14 @@ jobs:
       - name: clone btcrecover
         run: git clone -q https://github.com/3rdIteration/btcrecover /tmp/btcrecover && git -C /tmp/btcrecover checkout -q "$BTCR_SHA"
       - name: install btcrecover deps
-        run: pip install -q "wallycore>=1.0.0" "protobuf~=5.29.6" "pycryptodome~=3.23.0" "eth-keyfile==$ETH_KEYFILE_VERSION" "setuptools==$SETUPTOOLS_VERSION"
+        run: python3 -m pip install -q "wallycore>=1.0.0" "protobuf~=5.29.6" "pycryptodome~=3.23.0" "eth-keyfile==$ETH_KEYFILE_VERSION" "setuptools==$SETUPTOOLS_VERSION"
+      - name: diagnose python env
+        run: |
+          which -a python3 pip pip3 || true
+          python3 --version; python3 -m pip --version
+          python3 -c "import sys; print(sys.executable); print(sys.version); [print(p) for p in sys.path]"
+          python3 -m pip show -f pycryptodome || echo NO_PYDIST
+          python3 -c "import Crypto; print(Crypto.__file__)" || echo NO_CRYPTO_IMPORT
       - name: assert tool pins
         run: |
           hashcat --version | grep -q "v$HASHCAT_VERSION"
@@ -84,6 +95,7 @@ jobs:
           test "$(git -C /tmp/btcrecover rev-parse --short HEAD)" = "$BTCR_SHA"
           python3 -c "import importlib.metadata as m; assert m.version('eth-keyfile') == '$ETH_KEYFILE_VERSION', m.version('eth-keyfile')"
           python3 -c "import importlib.metadata as m; assert m.version('setuptools') == '$SETUPTOOLS_VERSION', m.version('setuptools')"
+          python3 -c "from Crypto.Cipher import AES; from Crypto.Hash import keccak"
       - name: run password handoff
         run: |
           go build -o /tmp/findbtc-handoff .

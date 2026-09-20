@@ -58,6 +58,7 @@ completely solve the pain point?"**
 | 37 | Homebrew tap + Windows managers | complete | 53ed052 |
 | 38 | Multi-target scans + unified report | complete | 3b67a44 |
 | 39 | Completions + man page | complete | 15d7167 |
+| 40 | Green CI matrix: Windows + password handoff | active | - |
 
 ## Global done criteria (every goal)
 
@@ -1310,6 +1311,34 @@ syntax checks. Full gate FMT clean, VET_OK, SUITE_EXIT=0.
 **Non-goals:** TUI; interactive help; new flags to justify it.
 
 **Verify:** freshness test; gates.
+
+## Goal 40 — Green CI matrix: Windows + password handoff
+
+**Pain to completely solve:** `ci` red since Goal 27 — Windows
+unit tests (advise quoting, tokenlist fixtures, batch and
+freshness tests) plus a never-green password-handoff job
+(`Crypto` import) fail while fail-fast cancels the rest of the
+matrix, so Linux/macOS/fuzz coverage is unknown, not green.
+
+**Completely solved when:**
+- [ ] Every named Windows failure is fixed at its root cause,
+      with product defects distinguished from bad measurements
+      (line endings, JSON escaping, shell quoting proven
+      through real shells).
+- [ ] The password-handoff job passes with the exact failing
+      interpreter traced — no blind reinstall.
+- [ ] One `ci` run is green across the full supported matrix
+      (ubuntu/macos/windows × stable/oldstable, gates, fuzz
+      smoke, password handoff); fail-fast restored.
+
+**Execute:**
+1. Deep-dive each failure class from the 5f33a76 logs.
+2. Fix + regression tests per class.
+3. Local gate, push, read the matrix, fix forward to green.
+
+**Non-goals:** new platforms; new handoff tools.
+
+**Verify:** green `ci` run; gates.
 
 ## Commit policy
 

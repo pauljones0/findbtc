@@ -6,5 +6,11 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 *.json text eol=lf
+*.sh text eol=lf
+# Generated completions and man page: byte-compared against LF
+# generator output, consumed by Unix shells/man, and shipped in
+# deb/rpm payloads — CRLF would break freshness and consumers.
+packaging/completion/** text eol=lf
+packaging/man/** text eol=lf
 # Binary fixtures must never be line-ending converted.
 detector/testdata/** binary

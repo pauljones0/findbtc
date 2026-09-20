@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -708,6 +709,9 @@ func runAdvise(path string) {
 		os.Exit(1)
 	}
 	fmt.Printf("Target: %s\n", ad.Target)
+	if runtime.GOOS == "windows" {
+		fmt.Printf("Shell: PowerShell (paste the commands below into PowerShell; the quoting is PowerShell single-quote style, not cmd.exe)\n")
+	}
 	if ad.Command == "" {
 		for _, r := range ad.Reasons {
 			fmt.Printf("  %s\n", r)

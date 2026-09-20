@@ -3,8 +3,8 @@ package detector
 import (
 	"fmt"
 	"os"
+	"runtime"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -144,11 +144,48 @@ func adviseRaw(path string, fi os.FileInfo, why string) (Advice, error) {
 }
 
 // shellQuote quotes path only when it needs it.
+// shellQuote renders path for paste into the platform's interactive
+// shell. Advice is copy/paste output, so the quoting must survive a
+// real shell round-trip — never Go syntax (whose doubled
+// backslashes no shell unpicks).
 func shellQuote(path string) string {
-	if !strings.ContainsAny(path, " \t\"'\\$`!()[]{}<>|;&*#?~") {
+	if runtime.GOOS == "windows" {
+		return quotePowerShell(path)
+	}
+	return quoteUnix(path)
+}
+
+// quoteUnix single-quotes paths holding shell-special characters,
+// escaping embedded single quotes. Backslashes, dollars, and
+// backticks are literal inside single quotes in sh, bash, zsh, and
+// fish alike, and so is a newline — which must still trigger
+// quoting, since a bare newline is a command separator (a bare CR
+// round-trips, but quoting only the true boundary keeps output
+// readable).
+func quoteUnix(path string) string {
+	if !strings.ContainsAny(path, " \t\n\"'\\$`!()[]{}<>|;&*#?~") {
 		return path
 	}
-	return strconv.Quote(path)
+	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
+}
+
+// quotePowerShell single-quotes paths holding characters special to
+// PowerShell argument mode, doubling embedded single quotes.
+// Single-quoted strings are fully literal in PowerShell — no $,
+// backtick, %, or wildcard expansion — per about_Quoting_Rules, so
+// over-quoting is always safe and the trigger set stays broad.
+// Backslashes are literal (no trailing doubling needed: PowerShell
+// rebuilds native command lines itself). This form is for
+// PowerShell ONLY; cmd.exe would take the quotes literally, so the
+// advice output labels its shell.
+func quotePowerShell(path string) string {
+	if path == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(path, " \t'\"$`&|<>(){}[];,@#%*?!^=+") {
+		return path
+	}
+	return "'" + strings.ReplaceAll(path, "'", "''") + "'"
 }
 
 func humanBytes(n int64) string {

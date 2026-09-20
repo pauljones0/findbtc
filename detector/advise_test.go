@@ -6,8 +6,11 @@ package detector
 // never a detection.
 
 import (
+	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -163,5 +166,160 @@ func TestAdviseUnsupportedPartitionsFallBackToRaw(t *testing.T) {
 	}
 	if joined := strings.Join(ad.Reasons, "; "); !strings.Contains(joined, "none opens as a supported filesystem") {
 		t.Errorf("reasons %q must name the layout", joined)
+	}
+}
+
+// Quoting forms, hand-verified against shell manuals (not against
+// each other): Unix single-quotes with '-escaping, PowerShell
+// single-quotes with ”-doubling. The real-shell round-trip tests
+// below are the proof; this table pins the documented form.
+func TestShellQuoteForms(t *testing.T) {
+	unix := map[string]string{
+		`/tmp/plain.img`:      `/tmp/plain.img`,
+		`/tmp/my dir/img.E01`: `'/tmp/my dir/img.E01'`,
+		`/tmp/$price/x`:       `'/tmp/$price/x'`,
+		"/tmp/o'clock/x":      "'" + `/tmp/o` + `'\''` + `clock/x'`,
+		"/tmp/back\\slash/x":  `'/tmp/back\slash/x'`,
+		"/tmp/a`b`/x":         "'/tmp/a`b`/x'",
+		`/tmp/semi;colon/x`:   `'/tmp/semi;colon/x'`,
+		`/tmp/star*/q?.bin`:   `'/tmp/star*/q?.bin'`,
+		`/tmp/paren(a)/[b]/x`: `'/tmp/paren(a)/[b]/x'`,
+		`/tmp/say"hi"/x`:      `'/tmp/say"hi"/x'`,
+		`/tmp/bang!hist/x`:    `'/tmp/bang!hist/x'`,
+		`/tmp/tilde~/user/x`:  `'/tmp/tilde~/user/x'`,
+		`/tmp/amp&amp/x`:      `'/tmp/amp&amp/x'`,
+		`/tmp/pipe|lt<gt>/x`:  `'/tmp/pipe|lt<gt>/x'`,
+		`/tmp/hash#at@eq=/x`:  `'/tmp/hash#at@eq=/x'`,
+		`/tmp/tab	sepx`:       "'/tmp/tab\tsepx'",
+		// A newline is a command separator, so it must trigger
+		// quoting (single-quoted LF is literal in sh, bash, zsh,
+		// fish); a bare CR round-trips and stays unquoted.
+		"/tmp/line\nbreak.img":      "'/tmp/line\nbreak.img'",
+		"/tmp/carriage\rreturn.img": "/tmp/carriage\rreturn.img",
+		"/tmp/a'b\nc$d/x":           "'" + `/tmp/a` + `'\''` + "b\nc$d/x'",
+		`C:\notwindows\plain`:       `'C:\notwindows\plain'`,
+	}
+	for in, want := range unix {
+		if got := quoteUnix(in); got != want {
+			t.Errorf("quoteUnix(%q) = %q, want %q", in, got, want)
+		}
+	}
+	windows := map[string]string{
+		`C:\plain\path.img`:       `C:\plain\path.img`,
+		`C:\my dir\img.E01`:       `'C:\my dir\img.E01'`,
+		`C:\trailing\slash\`:      `C:\trailing\slash\`,
+		`C:\trailing spaced\`:     `'C:\trailing spaced\'`,
+		`C:\dollar$dir\x`:         `'C:\dollar$dir\x'`,
+		`C:\backtick` + "`" + `x`: `'C:\backtick` + "`" + `x'`,
+		`C:\pct%100\x`:            `'C:\pct%100\x'`,
+		`C:\amp&amp\x`:            `'C:\amp&amp\x'`,
+		`C:\semi;scomma,y\x`:      `'C:\semi;scomma,y\x'`,
+		`C:\paren(a)\[b\]\x`:      `'C:\paren(a)\[b\]\x'`,
+		`C:\caret^tick\x`:         `'C:\caret^tick\x'`,
+		`C:\hash#at@bang!x`:       `'C:\hash#at@bang!x'`,
+		`C:\star*\q?\x`:           `'C:\star*\q?\x'`,
+		`C:\brace{a}\pipe|x`:      `'C:\brace{a}\pipe|x'`,
+		`C:\squote'o\x`:           `'C:\squote''o\x'`,
+		`C:\eq=plus+\x`:           `'C:\eq=plus+\x'`,
+		`C:\say"hi"\x`:            `'C:\say"hi"\x'`,
+		`\\srv\share\img.E01`:     `\\srv\share\img.E01`,
+		`\\srv\spaced share\x`:    `'\\srv\spaced share\x'`,
+		``:                        `''`,
+	}
+	for in, want := range windows {
+		if got := quotePowerShell(in); got != want {
+			t.Errorf("quotePowerShell(%q) = %q, want %q", in, got, want)
+		}
+	}
+	// shellQuote dispatches on the build platform.
+	if runtime.GOOS == "windows" {
+		if got := shellQuote(`C:\x`); got != `C:\x` {
+			t.Errorf("shellQuote dispatches wrong: %q", got)
+		}
+	} else if got := shellQuote(`/x`); got != `/x` {
+		t.Errorf("shellQuote dispatches wrong: %q", got)
+	}
+}
+
+// Unix paste proof: every quoted nasty path round-trips through
+// each available real shell byte-identical, and quoted names of
+// real on-disk files (including an LF name) resolve with test -e.
+// The shells are the oracle; nothing here mirrors quoteUnix.
+func TestShellQuoteUnixRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix round-trip; unix only")
+	}
+	var shells []string
+	for _, name := range []string{"sh", "bash", "zsh"} {
+		if path, err := exec.LookPath(name); err == nil {
+			shells = append(shells, path)
+		}
+	}
+	if len(shells) == 0 {
+		t.Skip("no unix shell available")
+	}
+	paths := []string{
+		"/tmp/my dir/img.E01",
+		"/tmp/$price/`tick`/x",
+		"/tmp/o'clock/say\"hi\"/x",
+		"/tmp/back\\slash/x",
+		"/tmp/semi;colon/amp&amp/pipe|x",
+		"/tmp/star*/q?.bin",
+		"/tmp/paren(a)/[b]/{c}/x",
+		"/tmp/bang!hist/tilde~/hash#/x",
+		"/tmp/tab\tsep/x",
+		"/tmp/line\nbreak.img",
+		"/tmp/a'b\nc$d/x",
+		"/tmp/carriage\rreturn.img",
+		"/tmp/plain.img",
+	}
+	for _, sh := range shells {
+		for _, p := range paths {
+			cmd := exec.Command(sh, "-c", "printf '%s' "+quoteUnix(p))
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("%s round-trip of %q failed: %v", sh, p, err)
+			}
+			if out.String() != p {
+				t.Errorf("%s round-trip of %q gave %q", sh, p, out.String())
+			}
+		}
+	}
+	// Real files: the shell must resolve each quoted name to the
+	// file created under exactly that name.
+	dir := t.TempDir()
+	names := []string{
+		"spaced name.img",
+		"dollar$literal.img",
+		"o'clock.img",
+		"back`tick`.img",
+		"line\nbreak.img",
+		"tab\tsep.img",
+		"star*.img",
+		"semi;colon.img",
+		"plain.img",
+	}
+	for _, n := range names {
+		if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, sh := range shells {
+		for _, n := range names {
+			p := filepath.Join(dir, n)
+			if out, err := exec.Command(sh, "-c", "test -e "+quoteUnix(p)).CombinedOutput(); err != nil {
+				t.Errorf("%s cannot resolve real file %q: %v\n%s", sh, p, err, out)
+			}
+			cmd := exec.Command(sh, "-c", "printf '%s' "+quoteUnix(p))
+			var out bytes.Buffer
+			cmd.Stdout = &out
+			if err := cmd.Run(); err != nil {
+				t.Fatalf("%s round-trip of real file %q failed: %v", sh, p, err)
+			}
+			if out.String() != p {
+				t.Errorf("%s round-trip of real file %q gave %q", sh, p, out.String())
+			}
+		}
 	}
 }

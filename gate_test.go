@@ -77,6 +77,101 @@ func runTestBinaryStdin(t *testing.T, input string, args ...string) (stdout, std
 	return outBuf.String(), errBuf.String(), exit
 }
 
+// advisedCommand runs -advise on dir and returns the Recommended
+// line with the findbtc binary name swapped for the test binary
+// (quoted, since it may hold spaces).
+func advisedCommand(t *testing.T, dir string) string {
+	t.Helper()
+	stdout, _, exit := runTestBinary(t, "-advise", dir)
+	if exit != 0 {
+		t.Fatalf("-advise exit %d", exit)
+	}
+	for _, line := range strings.Split(stdout, "\n") {
+		if rest, ok := strings.CutPrefix(line, "Recommended: findbtc "); ok {
+			return `"` + testBinary + `" ` + rest
+		}
+	}
+	t.Fatalf("no Recommended line in:\n%s", stdout)
+	return ""
+}
+
+// The advised command must paste: on unix the recommendation for a
+// spaced directory executes through a real sh byte-identical.
+func TestAdviseCommandPastesSh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh paste proof; unix only")
+	}
+	dir := filepath.Join(t.TempDir(), "spaced dir")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "m.bin")
+	if err := os.WriteFile(marker, []byte(strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("sh", "-c", advisedCommand(t, dir))
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pasted advice failed: %v\nstderr:\n%s", err, errBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "m.bin") {
+		t.Errorf("pasted walk found no hit in %s:\n%s", marker, outBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "[COMPLETE]") {
+		t.Errorf("pasted walk never completed, stderr:\n%s", errBuf.String())
+	}
+}
+
+// The advised command must paste on Windows through the labeled
+// shell: the recommendation for a spaced directory executes through
+// a real powershell.exe, and the quoted path round-trips through
+// Write-Output byte-identical. (cmd.exe is not the labeled shell:
+// PowerShell single-quote quoting would reach it literally.)
+func TestAdviseCommandPastesPowerShell(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("powershell paste proof; windows only")
+	}
+	ps, err := exec.LookPath("powershell")
+	if err != nil {
+		t.Skip("no powershell available")
+	}
+	dir := filepath.Join(t.TempDir(), "spaced dir")
+	if err := os.Mkdir(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "m.bin")
+	if err := os.WriteFile(marker, []byte(strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	line := advisedCommand(t, dir)
+	cmd := exec.Command(ps, "-NoProfile", "-NonInteractive", "-Command", "& "+line)
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("pasted advice failed in powershell: %v\nstderr:\n%s", err, errBuf.String())
+	}
+	if !strings.Contains(outBuf.String(), "m.bin") {
+		t.Errorf("pasted walk found no hit in %s:\n%s", marker, outBuf.String())
+	}
+	if !strings.Contains(errBuf.String(), "[COMPLETE]") {
+		t.Errorf("pasted walk never completed, stderr:\n%s", errBuf.String())
+	}
+	// The quoted path echoes back byte-identical (ASCII path;
+	// byte-exact nasty-name proof lives in the detector native
+	// round-trip test).
+	quoted, _ := strings.CutPrefix(line, `"`+testBinary+`" -walk `)
+	out, err := exec.Command(ps, "-NoProfile", "-Command", "Write-Output "+quoted).CombinedOutput()
+	if err != nil {
+		t.Fatalf("powershell echo failed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != dir {
+		t.Errorf("powershell round-trip gave %q, want %q", got, dir)
+	}
+}
+
 // runTestBinaryDir runs the test binary with its working directory
 // set, for relative-path cases like dash-prefixed filenames.
 func runTestBinaryDir(t *testing.T, dir string, args ...string) (stdout, stderr string, exit int) {
@@ -341,6 +436,27 @@ func writeGateFile(t *testing.T, dir, name, content string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// writeCarveHits writes a one-line hits.jsonl pointing at carvePath.
+// The line is marshaled, never concatenated: raw Windows paths hold
+// backslashes that would otherwise emit invalid JSON and silently
+// exercise the foreign-text fallback instead of the carve reader.
+func writeCarveHits(t *testing.T, dir, name, carvePath string) string {
+	t.Helper()
+	line, err := json.Marshal(map[string]any{
+		"description":  "d",
+		"needle":       "bestblock",
+		"offset":       0,
+		"target":       "t",
+		"block_offset": 0,
+		"match_length": 8,
+		"carve_path":   carvePath,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return writeGateFile(t, dir, name, string(line)+"\n")
 }
 
 // The -fail-on-hit contract: exit 3 on hits only with the flag;
@@ -801,8 +917,7 @@ func TestTokenlistCLI(t *testing.T) {
 	}
 	// hits.jsonl with a carve reads through to the carve bytes.
 	carve := writeGateFile(t, dir, "carve.bin", "quiet harbor pilot static")
-	hits := writeGateFile(t, dir, "hits.jsonl",
-		`{"description":"d","needle":"bestblock","offset":0,"target":"t","block_offset":0,"match_length":8,"carve_path":"`+carve+`"}`+"\n")
+	hits := writeCarveHits(t, dir, "hits.jsonl", carve)
 	stdout, _, exit = runTestBinary(t, "-tokenlist", hits)
 	if exit != 0 {
 		t.Fatalf("hits.jsonl exit %d", exit)
@@ -883,8 +998,7 @@ func TestHashesCLI(t *testing.T) {
 // scanned is blindness, not the "No token words found" success.
 func TestTokenlistAllCarvesUnreadable(t *testing.T) {
 	dir := t.TempDir()
-	hits := writeGateFile(t, dir, "dead.jsonl",
-		`{"description":"d","needle":"bestblock","offset":0,"target":"t","block_offset":0,"match_length":8,"carve_path":"`+filepath.Join(dir, "absent.bin")+`"}`+"\n")
+	hits := writeCarveHits(t, dir, "dead.jsonl", filepath.Join(dir, "absent.bin"))
 	stdout, stderr, exit := runTestBinary(t, "-tokenlist", hits)
 	if exit != 1 {
 		t.Fatalf("all-unreadable carves exit %d, want 1 (stdout %q)", exit, firstLine(stdout))
@@ -1238,8 +1352,19 @@ func TestTargetsFile(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("-targets run exit %d (stderr:\n%s)", exit, stderr)
 	}
-	if !strings.Contains(stdout, first) || !strings.Contains(stdout, good) {
-		t.Errorf("-targets run must carry positional and listed hits, stdout:\n%s", stdout)
+	// Parsed-JSON comparison: raw Contains fails on Windows,
+	// where JSON escapes the backslashes in temp paths.
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			t.Fatalf("hit is not JSON: %v\n%s", err, line)
+		}
+		tgt, _ := m["target"].(string)
+		seen[tgt] = true
+	}
+	if !seen[first] || !seen[good] {
+		t.Errorf("-targets run must carry positional and listed hits, got targets %v", seen)
 	}
 	raw, err := os.ReadFile(caseLog)
 	if err != nil {
@@ -1483,13 +1608,15 @@ func TestFlagsBeforeTargets(t *testing.T) {
 	plain := writeGateFile(t, dir, "plain.bin", strings.Repeat("z", 10010))
 	list := writeGateFile(t, dir, "targets.txt", marker+"\n")
 
-	// Flags-after-positional scans the tokens as media: the list
-	// file's marker is never found, -targets is a failed target.
+	// Flags-after-positional scans the tokens as media: neither
+	// plain.bin nor targets.txt holds a marker, so opening the
+	// list would be the only way a hit appears — and -targets
+	// itself fails as a filename.
 	stdout, stderr, exit := runTestBinary(t, "-json", plain, "-targets", list)
 	if exit != 0 {
 		t.Fatalf("flags-after run exit %d, want 0 (partial batch)", exit)
 	}
-	if strings.Contains(stdout, marker) {
+	if strings.TrimSpace(stdout) != "" {
 		t.Errorf("flags-after-positional must not open the list:\n%s", stdout)
 	}
 	if !strings.Contains(stderr, "[main] failed: -targets") {
