@@ -55,7 +55,7 @@ completely solve the pain point?"**
 | 34 | ETA + progress honesty for long scans | complete | 1eeb861 |
 | 35 | Stdin scanning (pipe-first flows) | complete | 71eb324 |
 | 36 | Git-history secrets via pipes | complete | a5d9355 |
-| 37 | Homebrew tap + Windows managers | queued | - |
+| 37 | Homebrew tap + Windows managers | complete | 53ed052 |
 | 38 | Multi-target scans + unified report | queued | - |
 | 39 | Completions + man page | queued | - |
 
@@ -1192,11 +1192,29 @@ privilege UX. Every install-friction report starts here.
 Blocked on tap ownership (user decision).
 
 **Completely solved when:**
-- [ ] `brew install <tap>/findbtc` works from a layman's
+- [x] `brew install <tap>/findbtc` works from a layman's
       terminal (smoked in CI on macos).
-- [ ] Windows story decided and documented: winget and/or
+- [x] Windows story decided and documented: winget and/or
       Scoop, or explicit "archives only, here's why"; install
       docs show copy-paste per-OS commands, each executed in CI.
+
+Decision record (Goal 37): tap `pauljones0/homebrew-findbtc`
+ships a cask (cask-over-formula per GoReleaser deprecation);
+Windows gets Scoop bucket `pauljones0/scoop-findbtc` as the
+supported path plus a locally validated winget manifest
+staged in-repo — no third-party PRs filed. GoReleaser
+automates formula/manifest regeneration from immutable
+release URLs + SHA256s; `scripts/verify-packaging-pins.py`
+binds URL-arch-SHA structurally (set-membership checking
+was proven insufficient by finding 014; 12-mutant offline
+self-test + live re-proof). install-smoke 4/4 green
+(run 35511710891); local gate FMT clean, VET_OK,
+SUITE_EXIT=0. G37 fixed Windows TestStdinPipeIdentity via
+structural parsed-JSON compare. Known pre-existing red,
+unchanged by G37 (ci failing since Goal 27): Windows
+TestAdvise*/TestTokenlist* and password-handoff
+(`No module named 'Crypto'` — CI env lacks pycryptodome);
+left for a future goal.
 
 **Execute:**
 1. Get tap ownership decision; create/point the tap.
