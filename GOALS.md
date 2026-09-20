@@ -58,7 +58,8 @@ completely solve the pain point?"**
 | 37 | Homebrew tap + Windows managers | complete | 53ed052 |
 | 38 | Multi-target scans + unified report | complete | 3b67a44 |
 | 39 | Completions + man page | complete | 15d7167 |
-| 40 | Green CI matrix: Windows + password handoff | active | - |
+| 40 | Green CI matrix: Windows + password handoff | complete | a0d05ca |
+| 41 | Owner recovery rehearsal end-to-end | active | - |
 
 ## Global done criteria (every goal)
 
@@ -1321,15 +1322,28 @@ freshness tests) plus a never-green password-handoff job
 matrix, so Linux/macOS/fuzz coverage is unknown, not green.
 
 **Completely solved when:**
-- [ ] Every named Windows failure is fixed at its root cause,
+- [x] Every named Windows failure is fixed at its root cause,
       with product defects distinguished from bad measurements
       (line endings, JSON escaping, shell quoting proven
       through real shells).
-- [ ] The password-handoff job passes with the exact failing
+- [x] The password-handoff job passes with the exact failing
       interpreter traced — no blind reinstall.
-- [ ] One `ci` run is green across the full supported matrix
+- [x] One `ci` run is green across the full supported matrix
       (ubuntu/macos/windows × stable/oldstable, gates, fuzz
       smoke, password handoff); fail-fast restored.
+
+**Done:** CI 35518785896 @889ef80 all 8 jobs green
+(ubuntu/macos/windows × stable/oldstable, gates, fuzz smoke,
+password handoff with live 3-hashcat/3-john/2-BTCRecover cracks);
+CI 35519188668 @a0d05ca all 8 green with fail-fast restored
+(diff: 4 workflow lines only). Product defects fixed:
+strconv.Quote advice (per-platform quoting), LF trigger,
+PowerShell labeled contract with trailing-sep strip and LF
+backtick-escape (native argv probe). Measurement fixed:
+CRLF .gitattributes, marshaled carve fixtures, generated-file
+freshness, handoff PATH shadowing (/usr/bin preprended over the
+hostedtoolcache python3). Queued local gate retired unrun as
+superseded by the named remote gates (same frozen source).
 
 **Execute:**
 1. Deep-dive each failure class from the 5f33a76 logs.
@@ -1339,6 +1353,40 @@ matrix, so Linux/macOS/fuzz coverage is unknown, not green.
 **Non-goals:** new platforms; new handoff tools.
 
 **Verify:** green `ci` run; gates.
+
+## Goal 41 — Owner recovery rehearsal end-to-end
+
+**Pain to completely solve:** unit goals prove pieces in
+isolation; no joined consumer proof exists that a non-expert owner
+can run the documented advice → scan → case-log → report →
+what-next path on cold synthetic media and understand what was
+scanned, what remains, and what to do next — without exposing
+fixture secrets or mutating source images.
+
+**Completely solved when:**
+- [ ] Existing end-to-end coverage is inventoried; the rehearsal
+      reuses it instead of inventing a redundant framework.
+- [ ] A bounded acceptance matrix covers: ordinary + hostile-but-
+      valid filenames, drive-root/UNC/extended-root semantics
+      where supported, one incomplete/unreadable target, one
+      benign decoy, one synthetic encrypted-wallet fixture.
+- [ ] The rehearsal asserts: source images byte-unchanged, no
+      fixture secret in default stdout/report, exact target bytes
+      reach native CLI argv, and coverage/status/help tell a
+      non-expert what was scanned and what remains.
+- [ ] The README block executes verbatim against the frozen CLI,
+      offline by default, after adversarial review of the matrix.
+
+**Execute:**
+1. Inventory existing e2e coverage; select the highest-value
+   uncovered owner pain.
+2. Bounded acceptance matrix + adversarial review.
+3. Fix demonstrated gaps; execute the README block verbatim.
+
+**Non-goals:** real user wallets or wallet data; balance
+lookups; paid calls; destructive disk access; new platforms.
+
+**Verify:** rehearsal script/log; gates.
 
 ## Commit policy
 
