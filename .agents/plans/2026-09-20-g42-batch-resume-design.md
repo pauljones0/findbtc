@@ -256,3 +256,35 @@ above as decisions 3, 4, and the digest rule.
 Alternatives ranked: no more consequential concrete
 owner pain found in code/ledger review; UNC proof
 recorded as explicit future work, not a substitute.
+
+## Addendum 2026-09-20 13:15 Regina — 025/026/027 publication-gate sequence
+
+- 025/026: gate drops + nil error + case-log complete = false
+  durable completion (frozen receipt 10/10 vs 3/10). Repaired on
+  d183600 with drain-then-error (EOF with skipped>0 returns
+  incomplete-coverage error; case-log error; batch failed-never-
+  complete) + journal freeze (no frontier journals after a skip is
+  counted). Root frozen acceptance TestRootPublicationCoverageCaseLog
+  passes on the repaired sources.
+- Independent review (needs-changes): falsified barrier-ordering
+  for the EOF-deferred zip-recovery flush (flushZipCandidates
+  publishes at root EOF, after all mid-root frontiers — a trip
+  there concerns pre-frontier bytes; probe: retry certifies
+  complete with 0/10 re-covered). Also: no CLI recourse for huge
+  archives (-max-nested-backlog flag approved as follow-up),
+  -race log-sink race (pre-existing sink, new concurrent call
+  site), exact-count determinism, dead pendingFrontier.complete.
+  Eager-publish ordering, EOF predicate, deadlock-freedom of the
+  current gate, kill window (intact inputs), case-log error choice,
+  and batch/range/stdin inheritance all challenged and held.
+- 027: same-cap resume replays the same admitted prefix forever
+  (cap3: same 3/10 x4 attempts, offset stuck at 1MB, never
+  complete — receipt findbtc-same-cap-retry-ebz_8pi2). Cap-raising
+  retry is not proof. Requires no-drop bounded scheduling that
+  makes progress under unchanged limits; honest error stays as the
+  safety floor. Owner analysis: naive blocking publishes deadlock
+  via the scanBlocks->stage-input-queue cycle (not just the
+  barrier); at least one side of every handoff must stay
+  non-blocking. Delegated to isolated workers (design+impl,
+  same-cap/flush-poison acceptance, review follow-ups) + shared
+  torture proof; integration owner merges, gates, pushes, reads CI.
