@@ -37,9 +37,11 @@ Windows, via Scoop (no admin needed):
     scoop install findbtc
 
 Windows, via winget from the prepared local manifests (community
-submission still pending, so this runs unelevated from files —
-see [docs/RELEASE.md](docs/RELEASE.md)):
+submission still pending — see [docs/RELEASE.md](docs/RELEASE.md)).
+Local-manifest installs are a winget experimental feature, so the
+one-time enable step needs elevation; the install itself does not:
 
+    winget settings --enable LocalManifestFiles   # once, elevated
     mkdir findbtc-winget; cd findbtc-winget
     curl -sSL -O https://raw.githubusercontent.com/pauljones0/findbtc/master/packaging/winget/pauljones0.findbtc.yaml
     curl -sSL -O https://raw.githubusercontent.com/pauljones0/findbtc/master/packaging/winget/pauljones0.findbtc.installer.yaml

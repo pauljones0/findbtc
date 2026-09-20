@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -97,16 +98,31 @@ func TestStdinPipeIdentity(t *testing.T) {
 	if !strings.Contains(pipeErr, "[COMPLETE]") {
 		t.Errorf("pipe scan must print [COMPLETE], stderr:\n%s", pipeErr)
 	}
-	norm := func(s, target string) string {
-		return strings.ReplaceAll(s, `"target":"`+target+`"`, `"target":"NORM"`)
+	// Normalize structurally (parsed JSON): Windows paths carry
+	// backslashes that JSON-escaping would defeat in a string
+	// replace. Descriptions embed the same label
+	// ("at <target> in ... block").
+	norm := func(s string) string {
+		var out []string
+		for _, line := range strings.Split(strings.TrimSpace(s), "\n") {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				t.Fatalf("hit is not JSON: %v\n%s", err, line)
+			}
+			tgt, _ := m["target"].(string)
+			m["target"] = "NORM"
+			if desc, ok := m["description"].(string); ok && tgt != "" {
+				m["description"] = strings.ReplaceAll(desc, tgt, "NORM")
+			}
+			raw, err := json.Marshal(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, string(raw))
+		}
+		return strings.Join(out, "\n")
 	}
-	// Descriptions embed the same label ("at <target> in ... block").
-	normDesc := func(s, target string) string {
-		return strings.ReplaceAll(s, "at "+target+" in", "at NORM in")
-	}
-	want := normDesc(norm(fileOut, target), target)
-	got := normDesc(norm(pipeOut, "stdin"), "stdin")
-	if got != want {
+	if got, want := norm(pipeOut), norm(fileOut); got != want {
 		t.Errorf("pipe hits differ from file hits:\npipe:\n%s\nfile:\n%s", got, want)
 	}
 }

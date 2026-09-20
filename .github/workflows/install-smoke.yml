@@ -55,6 +55,10 @@ jobs:
         run: |
           Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
           irm get.scoop.sh | iex
+          # The installer updates User PATH, which later steps do not
+          # inherit; export both bin dirs explicitly.
+          "$env:USERPROFILE\scoop\shims" | Out-File -Append $env:GITHUB_PATH
+          "$env:USERPROFILE\scoop\apps\scoop\current\bin" | Out-File -Append $env:GITHUB_PATH
       - name: install from bucket
         shell: pwsh
         run: |
@@ -84,6 +88,9 @@ jobs:
       - name: validate manifests
         shell: pwsh
         run: winget validate --manifest packaging/winget
+      - name: enable local-manifest installs
+        shell: pwsh
+        run: winget settings --enable LocalManifestFiles
       - name: install from local manifests
         shell: pwsh
         run: winget install --manifest packaging/winget --accept-package-agreements --accept-source-agreements
