@@ -38,10 +38,20 @@ type OffsetSpan struct {
 
 // coverageNote separates "no detections" from "nothing scanned": an
 // empty hits file is the output of a clean scan AND of a scan that
-// read zero bytes, so the empty report names both readings and points
-// at the scan's own coverage evidence.
+// read zero bytes — and since partial batches exit 0 with [COMPLETE]
+// while targets fail, that marker alone proves nothing. Coverage is
+// unknown from the report alone; the note points at the case log,
+// where every attempted target needs a complete record.
 const coverageNote = "an empty hits file is also what \"nothing was scanned\" looks like — " +
-	"confirm the scan covered its target (exit 0 with [COMPLETE] on stderr) before trusting a clean report"
+	"and a partial batch exits 0 with [COMPLETE] while targets fail, so that marker alone proves nothing. " +
+	"Zero detections are not coverage: confirm every attempted target has a complete case-log record before trusting this report"
+
+// coverageNotePartial is the nonempty twin: hit-bearing targets are
+// not scan coverage either, since clean and failed targets never
+// appear in the hits.
+const coverageNotePartial = "these hit-bearing targets are not scan coverage: clean targets leave no trace here, " +
+	"failed targets leave none either, and a partial batch exits 0 with [COMPLETE] while targets fail. " +
+	"Confirm every attempted target has a complete case-log record before trusting this report"
 
 // Report is the full triage summary of a detection set.
 type Report struct {
@@ -57,8 +67,9 @@ type Report struct {
 	Spans           map[string]OffsetSpan `json:"spans_by_target"`
 	Hits            []ReportHit           `json:"hits"`
 	Playbook        []string              `json:"playbook"`
-	// CoverageNote is set only when the input held no detections,
-	// warning machine consumers about the nothing-scanned ambiguity.
+	// CoverageNote is always set: the empty note for hitless
+	// input, the partial-coverage note otherwise. Hit targets are
+	// not scan coverage in either shape.
 	CoverageNote string `json:"coverage_note,omitempty"`
 }
 
@@ -295,6 +306,8 @@ func Summarize(dets []Detection) Report {
 	rep.Duplicates = rep.Total - rep.Unique
 	if rep.Unique == 0 {
 		rep.CoverageNote = coverageNote
+	} else {
+		rep.CoverageNote = coverageNotePartial
 	}
 	sort.Slice(rep.Hits, func(i, j int) bool {
 		if rep.Hits[i].Target != rep.Hits[j].Target {
@@ -321,7 +334,7 @@ func (r Report) Text() string {
 	var b strings.Builder
 	if r.Unique == 0 {
 		b.WriteString("Triage: no detections in this input — nothing to pursue.\n")
-		b.WriteString("Coverage note: " + coverageNote + ".\n")
+		b.WriteString("Coverage: " + coverageNote + ".\n")
 		return b.String()
 	}
 	targetWord := "targets"
@@ -402,6 +415,7 @@ func (r Report) Text() string {
 	if more := len(r.Hits) - shown; more > 0 {
 		fmt.Fprintf(&b, "  ... and %d more (see -json for the full list)\n", more)
 	}
+	b.WriteString("Coverage: " + coverageNotePartial + ".\n")
 	b.WriteString("Next steps:\n")
 	for i, s := range r.Playbook {
 		fmt.Fprintf(&b, "  %d. %s\n", i+1, s)

@@ -140,3 +140,40 @@ func TestVerifyCaseLogMissingSource(t *testing.T) {
 		t.Fatalf("no MISMATCH in:\n%s", out.String())
 	}
 }
+
+// Zero-coverage attempt records are evidence of failure, not hash
+// claims: the verifier reports them as NOT SCANNED without failing,
+// beside the OK lines for completed records.
+func TestVerifyCaseLogAttemptNeutral(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "a.bin")
+	if err := os.WriteFile(target, []byte("0123456789"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "case.jsonl")
+	missing := filepath.Join(dir, "gone.bin")
+	if err := ScanWithOptions(0, target,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ScanWithOptions(0, missing,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {}); err == nil {
+		t.Fatal("missing target scanned clean")
+	}
+	var out bytes.Buffer
+	if err := VerifyCaseLog(logPath, &out); err != nil {
+		t.Fatalf("log with an attempt record must verify: %v\n%s", err, out.String())
+	}
+	text := out.String()
+	if !strings.Contains(text, "OK "+target) {
+		t.Errorf("completed record lost its OK line:\n%s", text)
+	}
+	if !strings.Contains(text, "NOT SCANNED "+missing) {
+		t.Errorf("attempt record needs a NOT SCANNED line:\n%s", text)
+	}
+	if strings.Contains(text, "MISMATCH") {
+		t.Errorf("attempt record must not mismatch:\n%s", text)
+	}
+}

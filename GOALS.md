@@ -1258,6 +1258,16 @@ shape is unchanged. Full gate FMT clean, VET_OK,
 SUITE_EXIT=0; mixed good/bad batch fixture in
 `TestMultiTargetBatch`.
 
+Correction 016 (independent replay found consumers gaps):
+failed targets now leave zero-coverage attempt records
+(`error`/`unknown`, verified as `NOT SCANNED`); both report
+shapes warn that hit targets are not coverage and point at
+the case log; `-targets`/positionals refuse in non-scan
+modes (exit 2); flags-before-targets documented with `--`
+preserved for dash-prefixed names. Gate tests updated plus
+`TestBatchReportCoverage`, `TestScanInputModeGuard`,
+`TestFlagsBeforeTargets`; full gate green.
+
 **Execute:**
 1. Accept N targets; loop with per-target record keeping.
 2. Apply coverage-honesty rules per target + overall exit.

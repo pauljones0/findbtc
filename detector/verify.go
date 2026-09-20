@@ -40,6 +40,14 @@ func VerifyCaseLog(logPath string, out io.Writer) error {
 			failed++
 			continue
 		}
+		if isAttemptRecord(rec) {
+			// Zero-coverage outcome, not a hash claim: report
+			// the attempt and its reason without failing.
+			// Anything hashed (even partially) verifies by
+			// hash below.
+			fmt.Fprintf(out, "record %d: NOT SCANNED %s: %s\n", n, rec.Source.Path, rec.Error)
+			continue
+		}
 		if err := verifyRecord(rec); err != nil {
 			fmt.Fprintf(out, "record %d: MISMATCH %s: %s\n", n, rec.Source.Path, err)
 			failed++
@@ -57,6 +65,15 @@ func VerifyCaseLog(logPath string, out io.Writer) error {
 		return fmt.Errorf("%d of %d case-log records failed verification", failed, n)
 	}
 	return nil
+}
+
+// isAttemptRecord matches zero-coverage outcome records: a
+// non-complete status with no hashed bytes and no digests. Genuine
+// empty-target scans carry the empty-input digests, so they never
+// match; partial-hash error records still verify by hash.
+func isAttemptRecord(rec CaseLog) bool {
+	return rec.Status != "complete" && rec.Hash.BytesHashed == 0 &&
+		rec.Hash.SHA256 == "" && rec.Hash.MD5 == ""
 }
 
 // verifyRecord re-hashes [start_offset, size) minus skipped_ranges.

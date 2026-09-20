@@ -110,6 +110,8 @@ releases, and `go.mod` floors the language version at 1.24.
     findbtc -json -case-log case.jsonl img1.E01 img2.raw > hits.jsonl
     # or list the targets in a file (one path per line):
     findbtc -json -case-log case.jsonl -targets batch.txt > hits.jsonl
+    # Flags precede targets (parsing stops at the first positional);
+    # use -- before a target whose name starts with -.
 
 Not sure which mode fits your target? Ask first — it only inspects,
 never scans:
@@ -202,9 +204,12 @@ and prioritized next steps, with hits grouped under one section per
 target (each with its hit count and byte-offset span). `-report -`
 reads from stdin; add `-json` for the machine-readable report. Like the
 scanner, the report prints type labels only — never key or seed material.
-An empty hits file gets a coverage note instead of a clean bill of
-health: "no detections" is only trustworthy when the scan covered its
-target (exit 0 with `[COMPLETE]` on stderr). If the hits are yours
+Every report ends with a coverage line instead of a clean bill of
+health: listed hit targets are not scan coverage — clean targets
+leave no trace in the hits, failed ones neither, and a partial batch
+exits 0 with `[COMPLETE]` while targets fail. Confirm every attempted
+target has a `complete` record in the case log before trusting a
+report. If the hits are yours
 and you don't know what to do next, read
 [docs/WHAT_NEXT.md](docs/WHAT_NEXT.md) before anything else.
 

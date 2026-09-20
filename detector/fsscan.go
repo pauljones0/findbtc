@@ -104,10 +104,10 @@ func ScanFSVolumes(path string, base int64, autoSeed bool, opts Options, onDetec
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	targets, err := resolveVolumes(path, base, autoSeed)
 	if err != nil {
-		return nil, err
+		return nil, recordAttempt(opts, path, err)
 	}
 	if len(targets) > 1 && (opts.CheckpointPath != "" || opts.Resume) {
-		return nil, fmt.Errorf("%s: checkpointing is not supported across %d auto-seeded volumes in one journal; pin one volume with -fs-offset", path, len(targets))
+		return nil, recordAttempt(opts, path, fmt.Errorf("%s: checkpointing is not supported across %d auto-seeded volumes in one journal; pin one volume with -fs-offset", path, len(targets)))
 	}
 	var kinds []string
 	for _, t := range targets {
@@ -124,17 +124,17 @@ func ScanFSVolumes(path string, base int64, autoSeed bool, opts Options, onDetec
 func scanOneVolume(path string, base int64, opts Options, onDetection func(Detection), onProgress func(ProgressInfo), onEntry func(kind string, e FSEntry)) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot open %s: %w", path, err)
+		return "", recordAttempt(opts, path, fmt.Errorf("cannot open %s: %w", path, err))
 	}
 	kind, vol, err := OpenFS(f, base)
 	if err != nil {
 		f.Close()
-		return "", err
+		return "", recordAttempt(opts, path, err)
 	}
 	entries, err := vol.Entries()
 	if err != nil {
 		f.Close()
-		return "", err
+		return "", recordAttempt(opts, path, err)
 	}
 	f.Close()
 	for _, e := range entries {

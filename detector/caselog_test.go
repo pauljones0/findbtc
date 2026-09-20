@@ -301,3 +301,65 @@ func TestCaseLogRangeKind(t *testing.T) {
 		t.Fatal("range hash mismatch")
 	}
 }
+
+// A scan that never starts still leaves exactly one record: the
+// attempted path with status error, zero bytes, and no digests —
+// never invented coverage, never zero records.
+func TestCaseLogFailedAttempt(t *testing.T) {
+	dir := t.TempDir()
+	logPath := filepath.Join(dir, "case.jsonl")
+	missing := filepath.Join(dir, "gone.bin")
+	err := ScanWithOptions(0, missing,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {})
+	if err == nil {
+		t.Fatal("missing target scanned clean")
+	}
+	recs := readCaseLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("want exactly 1 attempt record, got %d", len(recs))
+	}
+	rec := recs[0]
+	if rec.Status != "error" {
+		t.Errorf("status %q, want error", rec.Status)
+	}
+	if rec.Source.Path != missing {
+		t.Errorf("path %q, want %q", rec.Source.Path, missing)
+	}
+	if rec.Source.Kind != "unknown" {
+		t.Errorf("kind %q, want unknown", rec.Source.Kind)
+	}
+	if rec.Hash.BytesHashed != 0 || rec.Hash.SHA256 != "" || rec.Hash.MD5 != "" {
+		t.Errorf("attempt invents coverage: %+v", rec.Hash)
+	}
+	if !strings.Contains(rec.Error, missing) {
+		t.Errorf("attempt must carry the reason, got %q", rec.Error)
+	}
+	if rec.Detections != 0 {
+		t.Errorf("detections %d, want 0", rec.Detections)
+	}
+}
+
+// A broken case log cannot hide the outcome: the append failure
+// joins the scan error instead of replacing it.
+func TestCaseLogAttemptAppendError(t *testing.T) {
+	dir := t.TempDir()
+	// A directory as the log path makes every append fail.
+	logPath := filepath.Join(dir, "is-a-dir")
+	if err := os.Mkdir(logPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "gone.bin")
+	err := ScanWithOptions(0, missing,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {})
+	if err == nil {
+		t.Fatal("missing target scanned clean")
+	}
+	if !strings.Contains(err.Error(), missing) {
+		t.Errorf("outcome hidden, got %q", err.Error())
+	}
+	if !strings.Contains(err.Error(), "unwritable") {
+		t.Errorf("append failure hidden, got %q", err.Error())
+	}
+}

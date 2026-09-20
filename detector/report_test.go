@@ -158,9 +158,15 @@ func TestSummarizeEmptyNamesCoverage(t *testing.T) {
 	if rep.CoverageNote == "" || !strings.Contains(rep.CoverageNote, "nothing was scanned") {
 		t.Errorf("empty report must carry a machine-readable coverage note: %+v", rep)
 	}
+	// Partial batches exit 0 with [COMPLETE] while targets fail,
+	// so hit-bearing reports need the warning too: listed hit
+	// targets are not scan coverage.
 	nonempty := Summarize([]Detection{reportFixtureDetection("bestblock", "/dev/sda", 10)})
-	if nonempty.CoverageNote != "" {
-		t.Errorf("non-empty report must not carry a coverage note: %q", nonempty.CoverageNote)
+	if nonempty.CoverageNote == "" || !strings.Contains(nonempty.CoverageNote, "not scan coverage") {
+		t.Errorf("non-empty report must carry a coverage note: %+v", nonempty)
+	}
+	if !strings.Contains(nonempty.Text(), "not scan coverage") {
+		t.Errorf("non-empty text must warn hit targets are not coverage:\n%s", nonempty.Text())
 	}
 }
 

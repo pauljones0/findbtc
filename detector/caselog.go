@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"hash"
 	"os"
 	"sync"
@@ -35,7 +36,7 @@ type CaseLog struct {
 // CaseSource identifies the scanned root target.
 type CaseSource struct {
 	Path        string `json:"path"`
-	Kind        string `json:"kind"` // raw, ewf, split, range, stdin
+	Kind        string `json:"kind"` // raw, ewf, split, range, stdin, or unknown (see recordAttempt)
 	Size        int64  `json:"size"`
 	StartOffset int64  `json:"start_offset"`
 	// Checkpoint names the progress journal when one was used; a
@@ -174,6 +175,50 @@ func (r *caseRecorder) finish(status string, runErr error) CaseLog {
 		log.EWF = ce
 	}
 	return log
+}
+
+// recordAttempt appends one zero-coverage attempt record and returns
+// runErr: the scan never started (missing target, unreadable source,
+// refused flag combination), so the record carries the attempted path
+// and the outcome with no invented bytes or hashes. Every scan entry
+// point calls this on its pre-pipeline failures, so a requested
+// target always leaves exactly one record — the pipeline appends its
+// own on started scans, never both. A broken case log cannot hide
+// the outcome either: an append failure joins the returned error.
+//
+// RecordAttempt is the exported form for main's pre-scan setup
+// (unallocated-range seeding), which fails before any entry point.
+// Kind stays "unknown": a kind is attested only by a started scan,
+// and attempts never start one.
+func recordAttempt(opts Options, path string, runErr error) error {
+	if opts.CaseLogPath == "" {
+		return runErr
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	rec := CaseLog{
+		Tool:     "findbtc",
+		Version:  opts.ToolVersion,
+		Started:  now,
+		Finished: now,
+		Status:   "error",
+		Error:    runErr.Error(),
+		Source: CaseSource{
+			Path:       path,
+			Kind:       "unknown",
+			Checkpoint: opts.CheckpointPath,
+		},
+		Flags: opts.Flags,
+	}
+	if err := appendCaseLog(opts.CaseLogPath, rec); err != nil {
+		return fmt.Errorf("%w (case log %s unwritable: %s)", runErr, opts.CaseLogPath, err.Error())
+	}
+	return runErr
+}
+
+// RecordAttempt appends one zero-coverage attempt record for a scan
+// that never started; see recordAttempt.
+func RecordAttempt(opts Options, path string, runErr error) error {
+	return recordAttempt(opts, path, runErr)
 }
 
 // appendCaseLog appends one record to the JSONL case log.

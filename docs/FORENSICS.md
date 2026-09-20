@@ -77,9 +77,18 @@ volume with `-fs-offset` and journal each volume separately.
 
 ## 4. Read the case log
 
-`-case-log case.jsonl` appends one JSON record per scanned target (a
+`-case-log case.jsonl` appends one JSON record per requested target (a
 multi-target run appends one record per target, in scan order;
-range scans append one per range, as above):
+range scans append one per range, as above). A target whose scan
+never starts (missing file, unreadable source, refused flag
+combination) still leaves one record: status `error`, kind
+`unknown`, zero bytes hashed and empty digests — an outcome with
+no invented coverage. `-verify-case-log` reports such records as
+`NOT SCANNED` without failing; anything hashed still verifies by
+hash. Exit 0 therefore vouches for the log's honesty, not for
+complete coverage: a log whose records are all `NOT SCANNED`
+still exits 0 — count the `complete` records to confirm what
+was actually covered:
 
 - `source`: path, kind (`raw`, `ewf`, `split`, `range`), size,
   start offset, checkpoint path.

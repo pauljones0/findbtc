@@ -46,10 +46,14 @@ Run `-report` on your hits for a summary with next steps per type:
 
 **Empty hits file?** An empty `hits.jsonl` means "clean" only when
 the scan covered its target — a scan that read zero bytes produces
-the same empty file. Before celebrating, check the scan's stderr
-for `[COMPLETE]` and its exit code (`1` means the target failed or
-nothing was scanned). Never trust an empty hits file from a failed
-run.
+the same empty file, and a partial batch exits 0 with `[COMPLETE]`
+while targets fail. Before celebrating, check the scan's stderr
+for `[COMPLETE]` *without* a `WARNING`, its exit code (`1` means
+the target failed or nothing was scanned), and — the durable
+check — that every attempted target has a `complete` record in
+the case log (`-verify-case-log` reports unscanned attempts as
+`NOT SCANNED`). Never trust an empty hits file from a failed
+run, and never treat zero detections as proof of a clean batch.
 
 ## 1. Marker hits — traces of a wallet database, no keys yet
 

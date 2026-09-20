@@ -77,6 +77,27 @@ func runTestBinaryStdin(t *testing.T, input string, args ...string) (stdout, std
 	return outBuf.String(), errBuf.String(), exit
 }
 
+// runTestBinaryDir runs the test binary with its working directory
+// set, for relative-path cases like dash-prefixed filenames.
+func runTestBinaryDir(t *testing.T, dir string, args ...string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command(testBinary, args...)
+	cmd.Dir = dir
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	exit = 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("cannot run test binary: %v", err)
+		}
+		exit = ee.ExitCode()
+	}
+	return outBuf.String(), errBuf.String(), exit
+}
+
 // A piped scan must report what a file scan of the same bytes
 // reports: identical -json hits modulo the target label, exit 0,
 // [COMPLETE] on stderr.
@@ -1065,7 +1086,9 @@ func TestMultiTargetBatch(t *testing.T) {
 	if len(targets) == 0 {
 		t.Error("batch fixtures produced no hits; test is vacuous")
 	}
-	// One case-log record per scanned target.
+	// One case-log record per requested target: complete scans
+	// plus a zero-coverage attempt record for the failure — failed
+	// targets must not vanish from the durable evidence.
 	raw, err := os.ReadFile(caseLog)
 	if err != nil {
 		t.Fatal(err)
@@ -1074,24 +1097,47 @@ func TestMultiTargetBatch(t *testing.T) {
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		var rec struct {
 			Status string `json:"status"`
+			Error  string `json:"error"`
 			Source struct {
 				Path string `json:"path"`
+				Kind string `json:"kind"`
 			} `json:"source"`
+			Hash struct {
+				SHA256      string `json:"sha256"`
+				MD5         string `json:"md5"`
+				BytesHashed int64  `json:"bytes_hashed"`
+			} `json:"hash"`
 		}
 		if err := json.Unmarshal([]byte(line), &rec); err != nil {
 			t.Fatalf("case-log line is not JSON: %v\n%s", err, line)
 		}
-		if rec.Status != "complete" {
+		logged = append(logged, rec.Source.Path+":"+rec.Status)
+		if rec.Source.Path == missing {
+			if rec.Status != "error" {
+				t.Errorf("failed target logged status %q, want error", rec.Status)
+			}
+			if rec.Hash.BytesHashed != 0 || rec.Hash.SHA256 != "" || rec.Hash.MD5 != "" {
+				t.Errorf("attempt record invents coverage: %+v", rec.Hash)
+			}
+			if rec.Source.Kind != "unknown" {
+				t.Errorf("attempt record kind %q, want unknown", rec.Source.Kind)
+			}
+			if !strings.Contains(rec.Error, missing) {
+				t.Errorf("attempt record must carry the reason, got %q", rec.Error)
+			}
+		} else if rec.Status != "complete" {
 			t.Errorf("scanned target logged status %q, want complete", rec.Status)
 		}
-		logged = append(logged, rec.Source.Path)
 	}
-	if len(logged) != 2 || logged[0] != good1 || logged[1] != good2 {
-		t.Errorf("want per-target records [good1 good2] in scan order, got %v", logged)
+	want := []string{good1 + ":complete", missing + ":error", good2 + ":complete"}
+	if strings.Join(logged, "\n") != strings.Join(want, "\n") {
+		t.Errorf("want per-target records in scan order:\n%s\ngot:\n%s", strings.Join(want, "\n"), strings.Join(logged, "\n"))
 	}
 
-	// All-bad batch: zero coverage exits 1 with no [COMPLETE].
-	_, stderr, exit = runTestBinary(t, "-json", filepath.Join(dir, "missing-a.bin"), filepath.Join(dir, "missing-b.bin"))
+	// All-bad batch: zero coverage exits 1 with no [COMPLETE] —
+	// but every attempt still leaves its record.
+	badLog := filepath.Join(dir, "bad-case.jsonl")
+	_, stderr, exit = runTestBinary(t, "-json", "-case-log", badLog, filepath.Join(dir, "missing-a.bin"), filepath.Join(dir, "missing-b.bin"))
 	if exit != 1 {
 		t.Errorf("all-bad batch exit %d, want 1 (stderr:\n%s)", exit, stderr)
 	}
@@ -1100,6 +1146,82 @@ func TestMultiTargetBatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "nothing was covered") {
 		t.Errorf("all-bad batch must say nothing was covered, stderr:\n%s", stderr)
+	}
+	raw, err = os.ReadFile(badLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("all-bad batch must leave 2 attempt records, got %d", len(lines))
+	}
+	for _, line := range lines {
+		var rec struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		if rec.Status != "error" {
+			t.Errorf("all-bad record status %q, want error", rec.Status)
+		}
+	}
+}
+
+// Batch reports through the real CLI: a mixed hit/clean/missing
+// scan exits 0 with [COMPLETE], yet its report lists only the
+// hit-bearing target — so both the nonempty and the empty report
+// must warn that hit targets are not coverage and point at the
+// case log.
+func TestBatchReportCoverage(t *testing.T) {
+	dir := t.TempDir()
+	hit := writeGateFile(t, dir, "hit.bin", strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	clean := writeGateFile(t, dir, "clean.bin", strings.Repeat("z", 10010))
+	missing := filepath.Join(dir, "missing.bin")
+	caseLog := filepath.Join(dir, "case.jsonl")
+
+	stdout, stderr, exit := runTestBinary(t, "-json", "-case-log", caseLog, hit, clean, missing)
+	if exit != 0 {
+		t.Fatalf("mixed batch exit %d", exit)
+	}
+	if !strings.Contains(stderr, "[COMPLETE]") {
+		t.Fatalf("mixed batch must print [COMPLETE]")
+	}
+	hitsFile := writeGateFile(t, dir, "hits.jsonl", stdout)
+	repOut, _, exit := runTestBinary(t, "-report", hitsFile)
+	if exit != 0 {
+		t.Fatalf("-report exit %d", exit)
+	}
+	if !strings.Contains(repOut, hit) {
+		t.Errorf("report must list the hit-bearing target:\n%s", repOut)
+	}
+	if strings.Contains(repOut, clean) || strings.Contains(repOut, missing) {
+		t.Errorf("report must not invent clean/failed targets:\n%s", repOut)
+	}
+	if !strings.Contains(repOut, "not scan coverage") || !strings.Contains(repOut, "complete case-log record") {
+		t.Errorf("nonempty report must warn hit targets are not coverage:\n%s", repOut)
+	}
+	repJSON, _, _ := runTestBinary(t, "-report", hitsFile, "-json")
+	var rep struct {
+		CoverageNote string `json:"coverage_note"`
+	}
+	if err := json.Unmarshal([]byte(repJSON), &rep); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rep.CoverageNote, "not scan coverage") {
+		t.Errorf("report JSON must carry the coverage note: %q", rep.CoverageNote)
+	}
+
+	// All-failed batch: empty hits, and the empty report must say
+	// coverage is unknown with the case log as the check.
+	emptyOut, _, exit := runTestBinary(t, "-json", missing, filepath.Join(dir, "missing2.bin"))
+	if exit != 1 || emptyOut != "" {
+		t.Fatalf("all-failed batch exit %d stdout %q, want 1/empty", exit, emptyOut)
+	}
+	emptyFile := writeGateFile(t, dir, "empty.jsonl", emptyOut)
+	repOut, _, _ = runTestBinary(t, "-report", emptyFile)
+	if !strings.Contains(repOut, "nothing was scanned") || !strings.Contains(repOut, "complete case-log record") {
+		t.Errorf("empty batch report must disclaim coverage:\n%s", repOut)
 	}
 }
 
@@ -1315,5 +1437,76 @@ func TestGenRefusals(t *testing.T) {
 	_, stderr, exit = runTestBinary(t, "-gen-completion=bash", "-gen-man")
 	if exit != 2 {
 		t.Errorf("combined generators exit %d, want 2 (stderr:\n%s)", exit, stderr)
+	}
+}
+
+// Scan inputs refuse in non-scan modes: -targets and stray
+// positionals must exit 2 naming the mode, never vanish silently —
+// including a missing -targets file, which must still error.
+func TestScanInputModeGuard(t *testing.T) {
+	dir := t.TempDir()
+	list := writeGateFile(t, dir, "targets.txt", "a.bin\n")
+	missingList := filepath.Join(dir, "no-list.txt")
+	target := writeGateFile(t, dir, "t.bin", "nothing here")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"targets-walk", []string{"-walk", dir, "-targets", list}, "-targets " + list},
+		{"targets-walk-missing", []string{"-walk", dir, "-targets", missingList}, "no-list.txt"},
+		{"targets-report", []string{"-report", target, "-targets", list}, "-report"},
+		{"targets-fs", []string{"-fs", target, "-targets", list}, "-fs"},
+		{"targets-advise", []string{"-advise", target, "-targets", list}, "-advise"},
+		{"targets-gen", []string{"-gen-man", "-targets", list}, "generation"},
+		{"positional-walk", []string{"-walk", dir, target}, "positional"},
+		{"positional-report", []string{"-report", target, target}, "-report"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, stderr, exit := runTestBinary(t, tc.args...)
+			if exit != 2 {
+				t.Errorf("%s exit %d, want 2 (stderr:\n%s)", tc.name, exit, stderr)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("%s must explain %q, stderr:\n%s", tc.name, tc.want, stderr)
+			}
+		})
+	}
+}
+
+// Flags stop at the first positional (Go parsing): a -targets flag
+// after a target is data, not a flag — and -- rescues filenames
+// that start with a dash.
+func TestFlagsBeforeTargets(t *testing.T) {
+	dir := t.TempDir()
+	marker := writeGateFile(t, dir, "marker.bin", strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	plain := writeGateFile(t, dir, "plain.bin", strings.Repeat("z", 10010))
+	list := writeGateFile(t, dir, "targets.txt", marker+"\n")
+
+	// Flags-after-positional scans the tokens as media: the list
+	// file's marker is never found, -targets is a failed target.
+	stdout, stderr, exit := runTestBinary(t, "-json", plain, "-targets", list)
+	if exit != 0 {
+		t.Fatalf("flags-after run exit %d, want 0 (partial batch)", exit)
+	}
+	if strings.Contains(stdout, marker) {
+		t.Errorf("flags-after-positional must not open the list:\n%s", stdout)
+	}
+	if !strings.Contains(stderr, "[main] failed: -targets") {
+		t.Errorf("-targets token must fail as a filename, stderr:\n%s", stderr)
+	}
+
+	// -- passes dash-prefixed filenames through as targets.
+	dash := writeGateFile(t, dir, "-dash.bin", strings.Repeat("q", 5000)+"wallet.dat"+strings.Repeat("q", 5000))
+	stdout, stderr, exit = runTestBinaryDir(t, dir, "-json", "--", "-dash.bin")
+	if exit != 0 {
+		t.Fatalf("-- dash file exit %d (stderr:\n%s)", exit, stderr)
+	}
+	if !strings.Contains(stdout, "-dash.bin") {
+		t.Errorf("-- dash file produced no hit for %s:\n%s", dash, stdout)
+	}
+	_, _, exit = runTestBinaryDir(t, dir, "-json", "-dash.bin")
+	if exit != 2 {
+		t.Errorf("bare dash filename exit %d, want 2 (flag parse must fail)", exit)
 	}
 }

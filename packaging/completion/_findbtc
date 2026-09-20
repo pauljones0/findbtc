@@ -15,8 +15,8 @@ _arguments -s -S \
   '-fail-on-hit[Exit 3 when the scan or report finds anything (for CI gates and pre-commit hooks); without it, finding hits still exits 0]' \
   '-fs[Filesystem-aware mode: recover deleted entries with names from the NTFS/ext/FAT/exFAT volume in FILE and scan their content]:value:_files' \
   '-fs-offset[Byte offset of the volume boot sector inside FILE (only with -fs and -unallocated-only); when omitted, the partition table is followed automatically]:value:_files' \
-  '-gen-completion[Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; ignores other flags)]:value:_files' \
-  '-gen-man[Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; ignores other flags)]' \
+  '-gen-completion[Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; scan inputs still refuse)]:value:_files' \
+  '-gen-man[Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; scan inputs still refuse)]' \
   '-hashes[Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning]:value:_files' \
   '-json[Print detections as JSON lines instead of human text]' \
   '-patch[Parse input as a patch series (git log -p): attribute hits to commit+path with history fingerprints for -baseline]' \
@@ -27,7 +27,7 @@ _arguments -s -S \
   '-s[Start at byte offset]:value:_files' \
   '-salvage[Analyze FILE for salvageable database pages instead of scanning]:value:_files' \
   '-salvage-out[Write the salvaged database image to PATH (only with -salvage)]:value:_files' \
-  '-targets[Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals]:value:_files' \
+  '-targets[Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals (flags must precede targets)]:value:_files' \
   '-tokenlist[Build a BTCRecover tokenlist from the words in FILE, a carve, or hits.jsonl with carves (or - for stdin) instead of scanning]:value:_files' \
   '-tokenlist-max[Emit at most N token lines, first-seen first (only with -tokenlist)]:value:_files' \
   '-tokenlist-out[Write the tokenlist to PATH instead of stdout (only with -tokenlist)]:value:_files' \

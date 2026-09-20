@@ -360,19 +360,19 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 	// resume past findings that never reported, so the combination
 	// refuses loudly instead of certifying lost coverage.
 	if opts.Patch && (opts.CheckpointPath != "" || opts.Resume) {
-		return fmt.Errorf("cannot scan patch: -checkpoint and -resume would resume past buffered findings; scan without them")
+		return recordAttempt(opts, path, fmt.Errorf("cannot scan patch: -checkpoint and -resume would resume past buffered findings; scan without them"))
 	}
 	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("cannot scan %s: %w", path, err)
+		return recordAttempt(opts, path, fmt.Errorf("cannot scan %s: %w", path, err))
 	}
 	if opts.CarveDir != "" {
 		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
-			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+			return recordAttempt(opts, path, fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err))
 		}
 	}
 	target, err := detectScanTarget(path, startOffset)
 	if err != nil {
-		return err
+		return recordAttempt(opts, path, err)
 	}
 	opts.strictRoot = true
 	if opts.Patch {
@@ -441,25 +441,25 @@ type rangeJournalCtx struct {
 func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if opts.Patch {
-		return fmt.Errorf("cannot scan patch: range scans slice the input, so patch positions would misattribute; scan the whole file instead")
+		return recordAttempt(opts, path, fmt.Errorf("cannot scan patch: range scans slice the input, so patch positions would misattribute; scan the whole file instead"))
 	}
 	if _, err := os.Stat(path); err != nil {
-		return fmt.Errorf("cannot scan %s: %w", path, err)
+		return recordAttempt(opts, path, fmt.Errorf("cannot scan %s: %w", path, err))
 	}
 	if opts.CarveDir != "" {
 		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
-			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+			return recordAttempt(opts, path, fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err))
 		}
 	}
 	startIdx := 0
 	var startOff int64 = -1
 	if opts.Resume {
 		if opts.CheckpointPath == "" {
-			return fmt.Errorf("resume requires a checkpoint path")
+			return recordAttempt(opts, path, fmt.Errorf("resume requires a checkpoint path"))
 		}
 		idx, off, resume, err := readRangeResume(opts.logWriter(), opts.CheckpointPath, path, ranges)
 		if err != nil {
-			return err
+			return recordAttempt(opts, path, err)
 		}
 		if !resume {
 			return nil // journal says the list already completed
@@ -623,7 +623,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	case "secrets":
 		secrets = true
 	default:
-		return fmt.Errorf("unknown scan profile %q (want \"\" or \"secrets\")", opts.Profile)
+		return recordAttempt(opts, seed.Describe(), fmt.Errorf("unknown scan profile %q (want \"\" or \"secrets\")", opts.Profile))
 	}
 	// Shutdown is coordinated through ctx: when the final EOF reaches
 	// detectWallets it reports completion, Scan returns, and the deferred

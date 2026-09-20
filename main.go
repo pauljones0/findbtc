@@ -77,10 +77,70 @@ func main() {
 	caseLog := flag.String("case-log", "", "Append a JSON case-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)")
 	profile := flag.String("profile", "", "Detector set: empty (wallet matchers) or secrets (adds private-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)")
 	failOnHit := flag.Bool("fail-on-hit", false, "Exit 3 when the scan or report finds anything (for CI gates and pre-commit hooks); without it, finding hits still exits 0")
-	targetsFile := flag.String("targets", "", "Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals")
-	genCompletion := flag.String("gen-completion", "", "Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; ignores other flags)")
-	genMan := flag.Bool("gen-man", false, "Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; ignores other flags)")
+	targetsFile := flag.String("targets", "", "Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals (flags must precede targets)")
+	genCompletion := flag.String("gen-completion", "", "Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; scan inputs still refuse)")
+	genMan := flag.Bool("gen-man", false, "Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; scan inputs still refuse)")
 	flag.Parse()
+
+	// Flag-presence probes (above the mode guard: the guard must
+	// see every mode selector, including flags passed at their
+	// default values).
+	visited := map[string]bool{}
+	fsOffsetSet := false
+	completeMaxSet := false
+	tokenlistMaxSet := false
+	flag.Visit(func(f *flag.Flag) {
+		visited[f.Name] = true
+		switch f.Name {
+		case "fs-offset":
+			fsOffsetSet = true
+		case "complete-max":
+			completeMaxSet = true
+		case "tokenlist-max":
+			tokenlistMaxSet = true
+		}
+	})
+	// Scan inputs (-targets, positionals) belong to scans only:
+	// every other mode takes its input as a flag value, so
+	// combining them refuses loudly instead of silently dropping
+	// input. -version stays exempt: info flags ignore the rest.
+	// Case order mirrors dispatch priority so the named mode is
+	// the one that would have run.
+	mode := ""
+	switch {
+	case *genCompletion != "" || *genMan:
+		mode = "generation (-gen-completion/-gen-man)"
+	case *reportPath != "" || visited["complete"] || visited["complete-out"] || visited["complete-max"]:
+		mode = "-report"
+	case *dfxmlPath != "":
+		mode = "-dfxml"
+	case *advisePath != "":
+		mode = "-advise"
+	case *verifyLogPath != "":
+		mode = "-verify-case-log"
+	case *tokenlistPath != "" || visited["tokenlist-out"] || visited["tokenlist-max"]:
+		mode = "-tokenlist"
+	case *hashesPath != "":
+		mode = "-hashes"
+	case *salvagePath != "" || visited["salvage-out"]:
+		mode = "-salvage"
+	case *watchPath != "" || visited["watch-out"] || visited["watch-format"] || visited["watch-count"] || *balanceEndpoint != "":
+		mode = "-watch"
+	case *fsPath != "":
+		mode = "-fs"
+	case *walkPath != "" || visited["walk-follow-symlinks"] || visited["walk-maxdepth"]:
+		mode = "-walk"
+	}
+	if mode != "" {
+		if *targetsFile != "" {
+			fmt.Fprintf(os.Stderr, "[main] Exiting due to error: -targets %s lists scan targets for a scan; it cannot be combined with %s\n", *targetsFile, mode)
+			os.Exit(2)
+		}
+		if flag.NArg() > 0 {
+			fmt.Fprintf(os.Stderr, "[main] Exiting due to error: positional targets %q are scan inputs; they cannot be combined with %s (pass input via the mode's flag)\n", flag.Args(), mode)
+			os.Exit(2)
+		}
+	}
 
 	// Generated artifacts (Goal 39) win over every mode: they
 	// render the flag table, not a scan.
@@ -110,20 +170,7 @@ func main() {
 	}
 	// An explicit -fs-offset pins the volume; otherwise -fs and
 	// -unallocated-only follow the partition table (Goal 12).
-	fsOffsetSet := false
-	completeMaxSet := false
-	tokenlistMaxSet := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "fs-offset" {
-			fsOffsetSet = true
-		}
-		if f.Name == "complete-max" {
-			completeMaxSet = true
-		}
-		if f.Name == "tokenlist-max" {
-			tokenlistMaxSet = true
-		}
-	})
+	// (Presence probes live above the mode guard.)
 	if *showVersion {
 		fmt.Printf("findbtc %s\n", version)
 		return
@@ -419,8 +466,11 @@ func main() {
 
 // resolveScanTargets joins positional targets with -targets FILE
 // entries (one path per line; blank lines and # comments skipped).
-// Positionals keep their order first so `findbtc a.img -targets
-// rest.txt` scans a.img before the listed paths.
+// Positionals keep their order first so `findbtc -targets rest.txt
+// a.img` scans a.img before the listed paths. Flags must precede
+// targets: Go's flag parser stops at the first positional, so
+// anything after it is a target — use -- before dash-prefixed
+// filenames.
 func resolveScanTargets(positionals []string, listPath string) ([]string, error) {
 	targets := append([]string{}, positionals...)
 	if listPath == "" {
@@ -507,7 +557,7 @@ func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed
 func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opts detector.Options, onDetection func(detector.Detection)) error {
 	kinds, free, err := detector.UnallocatedRangesAuto(path, fsOffset, autoSeed)
 	if err != nil {
-		return err
+		return detector.RecordAttempt(opts, path, err)
 	}
 	var ranges []detector.FSExtent
 	var total int64

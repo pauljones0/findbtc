@@ -66,11 +66,11 @@ func (t *stdinScanTarget) Open() (TargetReader, error) {
 func ScanStdinWithOptions(r io.Reader, startOffset int64, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if opts.CheckpointPath != "" || opts.Resume {
-		return fmt.Errorf("cannot scan stdin: -checkpoint and -resume need a stable path; pipes cannot resume")
+		return recordAttempt(opts, StdinTargetName, fmt.Errorf("cannot scan stdin: -checkpoint and -resume need a stable path; pipes cannot resume"))
 	}
 	if opts.CarveDir != "" {
 		if err := os.MkdirAll(opts.CarveDir, 0755); err != nil {
-			return fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err)
+			return recordAttempt(opts, StdinTargetName, fmt.Errorf("cannot create carve directory %s: %w", opts.CarveDir, err))
 		}
 	}
 	// The spill honors cancellation like the pipeline does: a
@@ -78,11 +78,11 @@ func ScanStdinWithOptions(r io.Reader, startOffset int64, opts Options, onDetect
 	// cancel stops between reads instead of draining terabytes.
 	ctx := opts.scanContext()
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("cannot scan stdin: %w", err)
+		return recordAttempt(opts, StdinTargetName, fmt.Errorf("cannot scan stdin: %w", err))
 	}
 	spill, err := os.CreateTemp(stdinSpillDir, "findbtc-stdin-*")
 	if err != nil {
-		return fmt.Errorf("cannot scan stdin: cannot create spill file: %w", err)
+		return recordAttempt(opts, StdinTargetName, fmt.Errorf("cannot scan stdin: cannot create spill file: %w", err))
 	}
 	spillName := spill.Name()
 	opts.logf("[stdin] spilling pipe to %s (cap %d bytes)\n", spillName, MaxStdinSpillBytes)
@@ -90,11 +90,11 @@ func ScanStdinWithOptions(r io.Reader, startOffset int64, opts Options, onDetect
 	cerr := spill.Close()
 	if serr != nil {
 		os.Remove(spillName)
-		return serr
+		return recordAttempt(opts, StdinTargetName, serr)
 	}
 	if cerr != nil {
 		os.Remove(spillName)
-		return fmt.Errorf("cannot scan stdin: spill close failed after %d bytes: %w", spilled, cerr)
+		return recordAttempt(opts, StdinTargetName, fmt.Errorf("cannot scan stdin: spill close failed after %d bytes: %w", spilled, cerr))
 	}
 	opts.logf("[stdin] spilled %d bytes; scanning\n", spilled)
 	// A piped EnCase set cannot decode: segments arrive as one flat

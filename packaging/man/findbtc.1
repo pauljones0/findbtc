@@ -68,10 +68,10 @@ Filesystem\-aware mode: recover deleted entries with names from the NTFS/ext/FAT
 Byte offset of the volume boot sector inside FILE (only with \-fs and \-unallocated\-only); when omitted, the partition table is followed automatically (default 0)
 .TP
 .B \-gen\-completion
-Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; ignores other flags)
+Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; scan inputs still refuse)
 .TP
 .B \-gen\-man
-Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; ignores other flags)
+Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; scan inputs still refuse)
 .TP
 .B \-hashes
 Extract crack\-ready password hashes from FILE (or \- for stdin) instead of scanning
@@ -104,7 +104,7 @@ Analyze FILE for salvageable database pages instead of scanning
 Write the salvaged database image to PATH (only with \-salvage)
 .TP
 .B \-targets
-Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals
+Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals (flags must precede targets)
 .TP
 .B \-tokenlist
 Build a BTCRecover tokenlist from the words in FILE, a carve, or hits.jsonl with carves (or \- for stdin) instead of scanning
