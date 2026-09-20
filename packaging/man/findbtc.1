@@ -1,0 +1,195 @@
+.TH FINDBTC 1
+.SH NAME
+findbtc \- scan raw block devices and forensic images for cryptocurrency wallet traces
+.SH SYNOPSIS
+findbtc [options] TARGET [TARGET ...]
+.br
+.B findbtc
+.B \-report
+.I hits.jsonl
+.br
+.B findbtc \-walk
+.I DIR
+.br
+.B findbtc \-advise
+.I TARGET
+.SH DESCRIPTION
+findbtc scans disks, images, files, and pipes for wallet traces
+(seed phrases, keys, descriptors, keystores) and, with the secrets
+profile, leaked credentials. Detections print to stdout; logs,
+progress, and the final [COMPLETE] line go to stderr, so
+.B \-json
+output stays parseable. The tool is offline by default and never
+prints key or seed material without the owner\-only
+.B \-\-reveal
+flag.
+.SH OPTIONS
+.TP
+.B \-advise
+Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)
+.TP
+.B \-balance\-endpoint
+Opt\-in: query ADDRESS balances from this Esplora\-compatible base URL (only with \-watch; leaks addresses to that server)
+.TP
+.B \-baseline
+Suppress \-walk/\-patch findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)
+.TP
+.B \-case\-log
+Append a JSON case\-log record per scan to FILE (source identity, streaming hashes, skipped ranges, counts)
+.TP
+.B \-checkpoint
+Journal scan progress to FILE every 1MB for crash recovery
+.TP
+.B \-complete
+With \-report: enumerate checksum\-valid completions for partial\-seed (near\-miss) hits (needs \-\-reveal; local terminal only)
+.TP
+.B \-complete\-max
+With \-report \-complete: candidates shown per hit, most\-likely first (only with \-complete) (default 128)
+.TP
+.B \-complete\-out
+With \-report \-complete: write candidate account keys (watch\-only) to PATH for \-watch (only with \-complete)
+.TP
+.B \-context
+Bytes carved before and after each hit (only with \-extract\-dir) (default 1048576)
+.TP
+.B \-dfxml
+Convert a \-json hits file (or \- for stdin) to DFXML on stdout instead of scanning
+.TP
+.B \-extract\-dir
+Carve bytes around each hit into DIR/hit\-NNNNNN.bin plus a .json sidecar (never on the scanned device itself)
+.TP
+.B \-fail\-on\-hit
+Exit 3 when the scan or report finds anything (for CI gates and pre\-commit hooks); without it, finding hits still exits 0
+.TP
+.B \-fs
+Filesystem\-aware mode: recover deleted entries with names from the NTFS/ext/FAT/exFAT volume in FILE and scan their content
+.TP
+.B \-fs\-offset
+Byte offset of the volume boot sector inside FILE (only with \-fs and \-unallocated\-only); when omitted, the partition table is followed automatically (default 0)
+.TP
+.B \-gen\-completion
+Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; ignores other flags)
+.TP
+.B \-gen\-man
+Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; ignores other flags)
+.TP
+.B \-hashes
+Extract crack\-ready password hashes from FILE (or \- for stdin) instead of scanning
+.TP
+.B \-json
+Print detections as JSON lines instead of human text
+.TP
+.B \-patch
+Parse input as a patch series (git log \-p): attribute hits to commit+path with history fingerprints for \-baseline
+.TP
+.B \-profile
+Detector set: empty (wallet matchers) or secrets (adds private\-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)
+.TP
+.B \-report
+Summarize a \-json hits file (or \- for stdin) instead of scanning
+.TP
+.B \-resume
+Resume from \-checkpoint instead of scanning from the start
+.TP
+.B \-reveal
+Print seed words for BIP39 hits (owner recovery only; NEVER share this output)
+.TP
+.B \-s
+Start at byte offset (default 0)
+.TP
+.B \-salvage
+Analyze FILE for salvageable database pages instead of scanning
+.TP
+.B \-salvage\-out
+Write the salvaged database image to PATH (only with \-salvage)
+.TP
+.B \-targets
+Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals
+.TP
+.B \-tokenlist
+Build a BTCRecover tokenlist from the words in FILE, a carve, or hits.jsonl with carves (or \- for stdin) instead of scanning
+.TP
+.B \-tokenlist\-max
+Emit at most N token lines, first\-seen first (only with \-tokenlist) (default 256)
+.TP
+.B \-tokenlist\-out
+Write the tokenlist to PATH instead of stdout (only with \-tokenlist)
+.TP
+.B \-unallocated\-only
+Scan only unallocated filesystem space (volume at \-fs\-offset); skips live data
+.TP
+.B \-verify\-case\-log
+Re\-hash the sources behind each record in case\-log FILE and report match/mismatch instead of scanning
+.TP
+.B \-version
+Print version and exit
+.TP
+.B \-walk
+Sweep every regular file under DIR with the standard detectors (symlinks not followed unless \-walk\-follow\-symlinks)
+.TP
+.B \-walk\-follow\-symlinks
+Follow symlinks during \-walk (loops fail safe per link)
+.TP
+.B \-walk\-maxdepth
+Descend at most N levels below DIR during \-walk (0 = unlimited) (default 0)
+.TP
+.B \-watch
+Derive watch\-only addresses from extended public keys in FILE (a carve, a key file, or hits.jsonl with carves) instead of scanning
+.TP
+.B \-watch\-count
+Addresses to derive per chain, external and change (only with \-watch) (default 20)
+.TP
+.B \-watch\-format
+Address\-list format: csv or json (only with \-watch) (default csv)
+.TP
+.B \-watch\-out
+Write the address list to PATH instead of stdout (only with \-watch)
+.SH "EXIT STATUS"
+.TP
+.B 0
+The run covered its target, hits or not. A batch that scanned at
+least one target exits 0 even when others failed (failures print
+loudly with a WARNING).
+.TP
+.B 1
+Runtime error or zero coverage: nothing was scanned. The reason
+is on stderr.
+.TP
+.B 2
+Bad flags or usage.
+.TP
+.B 3
+Hits found, only with
+.B \-fail\-on\-hit.
+.SH EXAMPLES
+Scan a disk to machine\-readable hits, then triage offline:
+.PP
+.RS
+.nf
+findbtc \-json /dev/sda > hits.jsonl
+findbtc \-report hits.jsonl
+.fi
+.RE
+.PP
+Scan several images in one run with per\-target case\-log records:
+.PP
+.RS
+.nf
+findbtc \-json \-case\-log case.jsonl img1.E01 img2.raw > hits.jsonl
+.fi
+.RE
+.SH "SEE ALSO"
+The guides below ship in the deb/rpm packages under
+.I /usr/share/doc/findbtc/
+and in the repo under
+.IR docs/ .
+.TP
+.I /usr/share/doc/findbtc/BENCHMARKS.md
+.TP
+.I /usr/share/doc/findbtc/PIPELINE_INGEST.md
+.TP
+.I /usr/share/doc/findbtc/RESOURCE_BOUNDS.md
+.TP
+.I /usr/share/doc/findbtc/README.md
+.SH AUTHOR
+Paul Jones <https://github.com/pauljones0/findbtc>

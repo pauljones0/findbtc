@@ -71,6 +71,26 @@ nfpms:
         dst: /usr/share/doc/findbtc/LICENSE
       - src: README.md
         dst: /usr/share/doc/findbtc/README.md
+      # Orphan guides linked from the man page's SEE ALSO (Goal 39).
+      - src: docs/BENCHMARKS.md
+        dst: /usr/share/doc/findbtc/BENCHMARKS.md
+      - src: docs/PIPELINE_INGEST.md
+        dst: /usr/share/doc/findbtc/PIPELINE_INGEST.md
+      - src: docs/RESOURCE_BOUNDS.md
+        dst: /usr/share/doc/findbtc/RESOURCE_BOUNDS.md
+      # Generated shell completions + man page (Goal 39). The zsh
+      # script ships in both dirs: vendor-completions is the Debian
+      # path, site-functions the rpm one.
+      - src: packaging/completion/findbtc.bash
+        dst: /usr/share/bash-completion/completions/findbtc
+      - src: packaging/completion/_findbtc
+        dst: /usr/share/zsh/vendor-completions/_findbtc
+      - src: packaging/completion/_findbtc
+        dst: /usr/share/zsh/site-functions/_findbtc
+      - src: packaging/completion/findbtc.fish
+        dst: /usr/share/fish/vendor_completions.d/findbtc.fish
+      - src: packaging/man/findbtc.1
+        dst: /usr/share/man/man1/findbtc.1
 
 # Blessed container image: scratch + the exact release binaries for
 # linux/amd64 and linux/arm64, pushed to GHCR on tag. Snapshot builds

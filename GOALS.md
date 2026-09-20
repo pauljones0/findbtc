@@ -1275,11 +1275,22 @@ man page; `--help` (61 lines) is the whole story. Smallest pain
 in the queue; compounds if the surface keeps growing.
 
 **Completely solved when:**
-- [ ] bash/zsh/fish completions generated from the real flag
+- [x] bash/zsh/fish completions generated from the real flag
       table (never hand-listed — test asserts every flag
       present).
-- [ ] Man page generated from the same source, installed by
+- [x] Man page generated from the same source, installed by
       deb/rpm; the 3 orphan docs linked from SEE ALSO.
+
+Decision record (Goal 39): `-gen-completion=bash|zsh|fish` and
+`-gen-man` render `flag.CommandLine` right after `flag.Parse`,
+so the scanner's own table is the single source; outputs are
+committed under `packaging/` and the gate tests byte-compare a
+fresh render plus assert every `-h`-parsed flag appears
+(anchored per shell, never hand-listed). nFPM ships the
+scripts, the page, and the three orphan guides; the
+install-smoke packaging job snapshot-builds and installs the
+deb, asserting payload, man render, and all three shell
+syntax checks. Full gate FMT clean, VET_OK, SUITE_EXIT=0.
 
 **Execute:**
 1. Generate completions + man from one source of truth.

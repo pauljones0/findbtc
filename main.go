@@ -78,7 +78,30 @@ func main() {
 	profile := flag.String("profile", "", "Detector set: empty (wallet matchers) or secrets (adds private-key blocks and credential shapes; see docs/SECRETS_PROFILE.md)")
 	failOnHit := flag.Bool("fail-on-hit", false, "Exit 3 when the scan or report finds anything (for CI gates and pre-commit hooks); without it, finding hits still exits 0")
 	targetsFile := flag.String("targets", "", "Read more scan targets from FILE (one path per line; blank lines and # comments ignored) in addition to positionals")
+	genCompletion := flag.String("gen-completion", "", "Write a shell completion script for bash, zsh, or fish to stdout and exit (generated from the flag table; ignores other flags)")
+	genMan := flag.Bool("gen-man", false, "Write the findbtc man page (troff) to stdout and exit (OPTIONS generated from the flag table; ignores other flags)")
 	flag.Parse()
+
+	// Generated artifacts (Goal 39) win over every mode: they
+	// render the flag table, not a scan.
+	if *genCompletion != "" && *genMan {
+		fmt.Fprintln(os.Stderr, "[main] Exiting due to error: choose one of -gen-completion or -gen-man")
+		os.Exit(2)
+	}
+	if *genCompletion != "" {
+		if err := writeCompletion(os.Stdout, *genCompletion); err != nil {
+			fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
+			os.Exit(2)
+		}
+		return
+	}
+	if *genMan {
+		if err := writeMan(os.Stdout, liveFlagTable()); err != nil {
+			fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	switch *profile {
 	case "", "default", "secrets":
 	default:

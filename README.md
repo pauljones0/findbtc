@@ -395,6 +395,20 @@ workflow. Each release ships with checksums, an SBOM, and SLSA
 provenance — see [docs/RELEASE.md](docs/RELEASE.md) to verify a build
 before trusting it with evidence.
 
+### Shell completion and man page
+
+The deb/rpm packages install bash, zsh, and fish completions plus a
+man page (`man findbtc`), all generated from the real flag table —
+every flag is covered by construction. From any other install, print
+them straight from the binary:
+
+    findbtc -gen-completion=bash   # or zsh, fish
+    findbtc -gen-man | man -l -
+
+The man page's SEE ALSO links the guides no other doc points at
+(benchmarks, pipeline ingest, resource bounds), installed under
+`/usr/share/doc/findbtc/`.
+
 ## License
 
 GPL

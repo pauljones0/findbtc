@@ -1176,3 +1176,144 @@ func TestMultiTargetRefusals(t *testing.T) {
 		})
 	}
 }
+
+// helpFlagNames parses the live flag table out of -h output (the
+// flag package's own rendering: "  -name" lines), so the freshness
+// tests below never hand-list a flag.
+func helpFlagNames(t *testing.T) []string {
+	t.Helper()
+	stdout, stderr, exit := runTestBinary(t, "-h")
+	if exit != 0 {
+		t.Fatalf("-h exit %d, want 0", exit)
+	}
+	var names []string
+	for _, line := range strings.Split(stdout+stderr, "\n") {
+		if !strings.HasPrefix(line, "  -") || strings.HasPrefix(line, "   ") {
+			continue
+		}
+		rest := strings.TrimPrefix(line, "  -")
+		i := 0
+		for i < len(rest) && (rest[i] == '-' || rest[i] >= 'a' && rest[i] <= 'z' || rest[i] >= 'A' && rest[i] <= 'Z' || rest[i] >= '0' && rest[i] <= '9') {
+			i++
+		}
+		if i == 0 {
+			continue
+		}
+		names = append(names, rest[:i])
+	}
+	if len(names) < 30 {
+		t.Fatalf("-h parsed %d flags, table looks truncated", len(names))
+	}
+	return names
+}
+
+// Completions are generated from the real flag table (Goal 39):
+// each committed script must byte-match a fresh render, and every
+// -h flag must appear in every shell's script.
+func TestGeneratedCompletionsFresh(t *testing.T) {
+	shells := map[string]string{
+		"bash": "packaging/completion/findbtc.bash",
+		"zsh":  "packaging/completion/_findbtc",
+		"fish": "packaging/completion/findbtc.fish",
+	}
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		stdout, stderr, exit := runTestBinary(t, "-gen-completion="+shell)
+		if exit != 0 {
+			t.Fatalf("-gen-completion=%s exit %d (stderr: %s)", shell, exit, firstLine(stderr))
+		}
+		raw, err := os.ReadFile(shells[shell])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stdout != string(raw) {
+			t.Errorf("%s completion drifted: re-run -gen-completion=%s", shells[shell], shell)
+		}
+	}
+	names := helpFlagNames(t)
+	// Anchored needles: a bare substring would let short flags
+	// like -s match inside other words.
+	raw, err := os.ReadFile(shells["bash"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if i := strings.Index(line, `compgen -W "`); i >= 0 {
+			rest := line[i+len(`compgen -W "`):]
+			listed = strings.Fields(rest[:strings.Index(rest, `"`)])
+
+		}
+	}
+	have := map[string]bool{}
+	for _, tok := range listed {
+		have[tok] = true
+	}
+	for _, n := range names {
+		if !have["-"+n] {
+			t.Errorf("bash completion lacks flag %q", n)
+		}
+	}
+	raw, err = os.ReadFile(shells["zsh"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if !strings.Contains(string(raw), "'-"+n+"[") {
+			t.Errorf("zsh completion lacks flag %q", n)
+		}
+	}
+	raw, err = os.ReadFile(shells["fish"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range names {
+		if !strings.Contains(string(raw), "-o "+n+" ") {
+			t.Errorf("fish completion lacks flag %q", n)
+		}
+	}
+}
+
+// The man page comes from the same source (Goal 39): the committed
+// page must byte-match a fresh render, every -h flag must appear in
+// OPTIONS, and SEE ALSO must link the three orphan guides.
+func TestGeneratedManFresh(t *testing.T) {
+	stdout, stderr, exit := runTestBinary(t, "-gen-man")
+	if exit != 0 {
+		t.Fatalf("-gen-man exit %d (stderr: %s)", exit, firstLine(stderr))
+	}
+	raw, err := os.ReadFile("packaging/man/findbtc.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stdout != string(raw) {
+		t.Error("man page drifted: re-run -gen-man")
+	}
+	for _, n := range helpFlagNames(t) {
+		// Troff escapes dashes; anchor on the .B request line.
+		needle := ".B \\-" + strings.ReplaceAll(n, "-", `\-`)
+		if !strings.Contains(string(raw), needle) {
+			t.Errorf("man page lacks flag %q", n)
+		}
+	}
+	for _, d := range []string{"BENCHMARKS.md", "PIPELINE_INGEST.md", "RESOURCE_BOUNDS.md"} {
+		if !strings.Contains(string(raw), d) {
+			t.Errorf("man page SEE ALSO lacks orphan doc %s", d)
+		}
+	}
+}
+
+// Generator misuse refuses loudly: an unknown shell and the
+// completion+man combination both exit 2.
+func TestGenRefusals(t *testing.T) {
+	_, stderr, exit := runTestBinary(t, "-gen-completion=powershell")
+	if exit != 2 {
+		t.Errorf("bad shell exit %d, want 2 (stderr:\n%s)", exit, stderr)
+	}
+	if !strings.Contains(stderr, "bash, zsh, or fish") {
+		t.Errorf("bad shell must list shells, stderr:\n%s", stderr)
+	}
+	_, stderr, exit = runTestBinary(t, "-gen-completion=bash", "-gen-man")
+	if exit != 2 {
+		t.Errorf("combined generators exit %d, want 2 (stderr:\n%s)", exit, stderr)
+	}
+}
