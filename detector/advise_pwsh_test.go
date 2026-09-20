@@ -76,18 +76,26 @@ func TestQuotePowerShellNativeRoundTrip(t *testing.T) {
 	if err := os.Mkdir(trailDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	// Real paths resolve AND round-trip; argv-only entries (LF/CR:
-	// illegal in Win32 names) round-trip through the native probe.
-	var real, argvOnly []string
+	plainDir := filepath.Join(dir, "dollar$dir")
+	if err := os.Mkdir(plainDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Each pair is (advised input, exact argv the real chain must
+	// deliver). Trailing separators strip — the want is the known
+	// dir variable, not a re-trim — while LF/CR (illegal in Win32
+	// names, argv-only) must arrive byte-exact via the escape form.
+	var pairs [][2]string
 	for _, n := range names {
-		real = append(real, filepath.Join(dir, n))
+		p := filepath.Join(dir, n)
+		pairs = append(pairs, [2]string{p, p})
 	}
-	real = append(real, trailDir+string(os.PathSeparator))
-	argvOnly = []string{
-		filepath.Join(dir, "line\nbreak.img"),
-		filepath.Join(dir, "carriage\rreturn.img"),
-	}
-	for i, p := range append(append([]string{}, real...), argvOnly...) {
+	sep := string(os.PathSeparator)
+	pairs = append(pairs, [2]string{trailDir + sep, trailDir})
+	pairs = append(pairs, [2]string{plainDir + sep, plainDir})
+	pairs = append(pairs, [2]string{filepath.Join(dir, "line\nbreak.img"), filepath.Join(dir, "line\nbreak.img")})
+	pairs = append(pairs, [2]string{filepath.Join(dir, "carriage\rreturn.img"), filepath.Join(dir, "carriage\rreturn.img")})
+	for i, pair := range pairs {
+		p, want := pair[0], pair[1]
 		quoted := quotePowerShell(p)
 		out := filepath.Join(dir, fmt.Sprintf("argv%d.bin", i))
 		script := "& $env:FINDBTC_PS_BIN " + quoted
@@ -104,9 +112,15 @@ func TestQuotePowerShellNativeRoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("powershell native round-trip of %q produced no argv file: %v", p, err)
 		}
-		if string(got) != p {
-			t.Errorf("powershell native round-trip of %q gave %q", p, string(got))
+		if string(got) != want {
+			t.Errorf("powershell native round-trip of %q gave %q, want %q", p, string(got), want)
 		}
+	}
+	// The quoted emission of every real path (files and both
+	// trailing-separator dirs) still resolves to that path.
+	real := []string{trailDir + sep, plainDir + sep}
+	for _, n := range names {
+		real = append(real, filepath.Join(dir, n))
 	}
 	for _, p := range real {
 		script := "if (Test-Path -LiteralPath " + quotePowerShell(p) + ") { exit 0 } else { exit 1 }"

@@ -37,6 +37,14 @@ JOHN=${JOHN:-john}
 HASHCAT=${HASHCAT:-hashcat}
 BTCR_DIR=${BTCR_DIR:?set BTCR_DIR to a BTCRecover checkout}
 PYTHON=${PYTHON:-python3}
+# Resolve the interpreter NOW, before link_tool mutates PATH below:
+# prepending a tool dir (e.g. /usr/bin for hashcat) would otherwise
+# shadow this python3 with a dep-less one (observed: hostedtoolcache
+# pip deps invisible, ModuleNotFoundError Crypto).
+case "$PYTHON" in
+*/*) ;;
+*) PYTHON=$(command -v "$PYTHON") || { echo "python interpreter not found: $PYTHON" >&2; exit 1; } ;;
+esac
 DOC=$REPO/docs/PASSWORD_RECOVERY.md
 
 # Never rm -rf a caller-supplied path: an accidental WORK value (a
@@ -73,7 +81,11 @@ link_tool() {
 		*) p=$(command -v "$p") ;;
 	esac
 	if [ "$(basename "$p")" = "$2" ]; then
-		export PATH=$(cd "$(dirname "$p")" && pwd -P):$PATH
+		d=$(cd "$(dirname "$p")" && pwd -P)
+		case ":$PATH:" in
+		*":$d:"*) ;;
+		*) export PATH=$d:$PATH ;;
+		esac
 	else
 		ln -s "$p" "./$2"
 	fi

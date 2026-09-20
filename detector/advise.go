@@ -169,18 +169,54 @@ func quoteUnix(path string) string {
 	return "'" + strings.ReplaceAll(path, "'", `'\''`) + "'"
 }
 
-// quotePowerShell single-quotes paths holding characters special to
-// PowerShell argument mode, doubling embedded single quotes.
+// quotePowerShell renders path for paste into PowerShell (the
+// labeled Windows shell; cmd.exe would take the quotes literally).
 // Single-quoted strings are fully literal in PowerShell — no $,
 // backtick, %, or wildcard expansion — per about_Quoting_Rules, so
 // over-quoting is always safe and the trigger set stays broad.
-// Backslashes are literal (no trailing doubling needed: PowerShell
-// rebuilds native command lines itself). This form is for
-// PowerShell ONLY; cmd.exe would take the quotes literally, so the
-// advice output labels its shell.
+//
+// Two repairs from real powershell.exe evidence (Goal 40):
+//   - A trailing backslash is stripped (roots like C:\ kept): the
+//     separator is insignificant to the target, but PowerShell's
+//     native command-line rebuild wraps spaced args in "..." without
+//     escaping it, so argv would end in a literal quote. Stripping is
+//     version-proof; doubling would differ between 5.1 and 7.3+.
+//   - LF/CR (illegal in Win32 names, but quotable input) use the
+//     double-quote form with backtick escapes: a literal newline
+//     inside single quotes would start a new PowerShell statement —
+//     a paste-time command injection — while `"a`nb"` parses to the
+//     exact string.
 func quotePowerShell(path string) string {
 	if path == "" {
 		return "''"
+	}
+	if len(path) > 3 {
+		path = strings.TrimRight(path, `\`)
+		if path == "" {
+			return "''"
+		}
+	}
+	if strings.ContainsAny(path, "\r\n") {
+		var b strings.Builder
+		b.WriteByte('"')
+		for _, r := range path {
+			switch r {
+			case '`':
+				b.WriteString("``")
+			case '$':
+				b.WriteString("`$")
+			case '"':
+				b.WriteString("`\"")
+			case '\r':
+				b.WriteString("`r")
+			case '\n':
+				b.WriteString("`n")
+			default:
+				b.WriteRune(r)
+			}
+		}
+		b.WriteByte('"')
+		return b.String()
 	}
 	if !strings.ContainsAny(path, " \t'\"$`&|<>(){}[];,@#%*?!^=+") {
 		return path
