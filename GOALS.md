@@ -49,6 +49,15 @@ completely solve the pain point?"**
 | 28 | Embedding pass (quiet + cancel) | complete | e256cf6 |
 | 29 | Baseline/allowlist for repeat sweeps | complete | 1e36005 |
 | 30 | Offline secret verification | complete | - |
+| 31 | Coverage honesty (exit codes + skipped accounting) | complete | - |
+| 32 | Offline seed completion (1–2 missing words) | complete | - |
+| 33 | Password handoff verified vs real tools | queued | - |
+| 34 | ETA + progress honesty for long scans | queued | - |
+| 35 | Stdin scanning (pipe-first flows) | queued | - |
+| 36 | Git-history secrets via pipes | queued | - |
+| 37 | Homebrew tap + Windows managers | queued | - |
+| 38 | Multi-target scans + unified report | queued | - |
+| 39 | Completions + man page | queued | - |
 
 ## Global done criteria (every goal)
 
@@ -841,6 +850,329 @@ new secret types; entropy-scored generic matchers.
 
 **Verify:** truncation fixtures rejected; corpus silent; audit
 written; gates.
+
+## Goal 31 — Coverage honesty (exit codes + skipped accounting)
+
+**Pain to completely solve:** the tool can scan nothing and report
+success. An unreadable root target prints a warning and exits 0; a
+`-walk` that failed files exits 0; only `-fail-on-hit` moves the
+code, and only for hits. CI and scripts trust 0 — for forensics
+software, an exit code that means "clean" when it means "blind" is
+a false negative with a stamp on it.
+
+**Completely solved when:**
+- [x] A scan whose ROOT target fails (unreadable, missing mid-run,
+      zero bytes covered) exits 1 with the reason on stderr.
+      Nested-target tolerance (one bad archive inside a good
+      image) is unchanged and still exits 0.
+- [x] `-walk` reports skipped/failed counts loudly, and exits 1 on
+      zero coverage (nothing scanned); `-report` distinguishes
+      "no detections" from "nothing scanned". Exit contract
+      table (README + gate matrix) updated; no hit-exit change.
+
+Decision record (Goal 31): walk rule is zero-coverage (exit 1 only
+when nothing was scanned), not strict (any failure → 1), per the
+goal's bias note — plus a loud `WARNING` whenever any file failed.
+Skips stay policy (counted in the summary, no warning): warning on
+every skipped symlink would train users to ignore the line. Empty
+files, `/dev/null`, resume-at-EOF, and `-s` past EOF stay exit 0:
+zero bytes of an expected zero is a success, not blindness.
+
+**Execute:**
+1. Decide the walk rule at goal time: strict (any failure → 1)
+   vs zero-coverage (nothing scanned → 1). Bias: zero-coverage
+   plus a loud skipped/failed line whenever nonzero.
+2. Implement root-failure detection in runPipeline/runScan and
+   the walk summary/exit; extend the gate_test exit matrix.
+3. Update the README exit-code contract + WHAT_NEXT stop rules.
+
+**Non-goals:** changing hit exits (3 stays); per-file exit codes;
+retrying failed files.
+
+**Verify:** exit-matrix tests incl. chmod-000 root, all-failed
+walk, nested-archive tolerance (still 0); gates.
+
+## Goal 32 — Offline seed completion (1–2 missing words)
+
+**Pain to completely solve:** "12th word smudged" is one of the
+most common owner disasters, and the fix is 2,048 checksum-gated
+tries — but today it needs BTCRecover know-how (tokenlists,
+versions, address DBs). findbtc finds partial/fuzzy seeds and
+derives watch-only addresses; completion is the missing middle
+that closes the owner loop end-to-end.
+
+**Completely solved when:**
+- [x] Given 11-of-12 / 23-of-24 (or 2 missing anywhere — 4M
+      tries, still fast), the tool enumerates checksum-valid
+      completions offline, most-likely first, feeding the
+      existing watch-only flow without copy-paste. Past 2
+      missing words it refuses loudly (billions of tries),
+      pointing at BTCRecover/GPU.
+- [x] Near-miss correction suggests checksum-valid neighbors
+      ("did you mean X?"); the anti-scam box + --reveal warning
+      pattern travels with it (local terminal only, never
+      transmitted); docs cover when to stop.
+
+Decision record (Goal 32): shape is a `-report` follow-up
+(`-report hits.jsonl -complete --reveal [-complete-out PATH]
+[-complete-max N]`), not a new mode, per the goal's bias. Rationale:
+partial-seed hits already exist as near-miss detections, and
+completion needs their `--reveal` words — a sibling mode would
+re-invent hit input. Smudged-paper owners (no scan) transcribe words
+with an `xxxx` placeholder and scan that file. The watch-only handoff
+is a keys file (`-complete-out`, 3 standard account keys per
+candidate: m/44'/0'/0' xpub, m/49'/0'/0' ypub, m/84'/0'/0' zpub)
+consumed directly by `-watch`; phrases never land in the file —
+candidate numbers link the terminal listing to the keys. Three fixed
+paths is coverage, not derivation-path brute force (non-goal).
+`-complete` refuses `-json` (machine output gets saved/logged) and
+requires `--reveal`. Evidence: 15 one-gap oracle vectors (all
+lengths × first/mid/checksum-word) + 6 two-gap oracle vectors from
+an independent stdlib-Python reimplementation (two checksum methods;
+PBKDF2 hashlib vs manual loop; BIP32 chain vs in-repo xprv +
+Go/Python EC cross-check; seed→xpub three-way btcsuite/Python/Go
+agreement); every doc recipe executed verbatim. Second-reader trial:
+not run in-session (no reader available) — the handoff text is the
+`-complete` output + WHAT_NEXT §3, both exercised verbatim instead.
+
+**Execute:**
+1. Decide shape at goal time: `-report` follow-up on
+   partial-seed hits vs `-hashes`-style sibling. Bias: follow-up
+   (no mode 11).
+2. Implement checksum-gated enumeration (12/15/18/21/24,
+   missing anywhere incl. checksum word) + watch-only handoff.
+3. WHAT_NEXT section + scam-box wording; second-reader trial
+   on the handoff text.
+
+**Non-goals:** 3+ missing words; derivation-path brute force;
+anything networked; spending.
+
+**Verify:** known-answer completions (all lengths/positions);
+refusal tests; no-new-net-imports test; gates.
+
+## Goal 33 — Password handoff verified vs real tools
+
+**Pain to completely solve:** tokenlist authoring is BTCRecover's
+documented hard part, and our crack-ready exports +
+PASSWORD_RECOVERY.md have never been executed against real
+hashcat/John/BTCRecover. An owner who reaches this step with a
+broken handoff loses everything the scan found.
+
+**Completely solved when:**
+- [x] Exported hashes crack with real John + hashcat in CI
+      (pinned versions, tiny known-answer corpus).
+- [x] A generated --tokenlist from hit context cracks a test
+      wallet in real BTCRecover (pip-installed in CI); every
+      PASSWORD_RECOVERY.md command executed verbatim in CI and
+      the doc stamped with tool versions; failure modes + cost
+      estimates documented.
+
+Decision record (Goal 33): verification, not new capability —
+`-hashes` extraction predates this goal; G33 added the `-tokenlist`
+builder, the deterministic corpus + generator, the runbook, the
+verbatim harness (`scripts/password-handoff.sh` executes every
+```sh line in doc order and asserts live cracks + the version stamp),
+and the `password-handoff` CI job. Pins: John 1.9.0-jumbo-1
+(openwall tarball + a GCC≥13 blake2 struct-padding patch that
+changes no hashes), hashcat 6.2.6 (apt on ubuntu-24.04, asserted),
+BTCRecover @1457088, eth-keyfile 0.6.0, setuptools 80.9.0
+(eth-keyfile still imports pkg_resources, removed in setuptools
+≥81). Evidence (final design, demonstrated twice): runs C+D each
+HARNESS_EXIT=0 — 22/22 doc commands verbatim, live-crack counts
+(hashcat Status:Cracked×3, john Session completed×3, BTCRecover
+found×2), 6/6 version stamps (4 tools + 2 Python pins), corpus
+`--check` clean; sentinel file intact; toolchain hashcat potfile
+md5-stable (a0e05dcc…) across all runs; run-local pots hold 4+4
+fresh cracks each; full suite SUITE_EXIT=0. An early green run's
+hashcat half was later found to be potfile replay, not live
+cracking — the live-crack counts were added so replays fail, and
+only post-count runs count as evidence. Local toolchain recipe
+(no sudo): dpkg-extracted hashcat+pocl under /tmp with
+LD_LIBRARY_PATH + OCL_ICD_VENDORS wrapper, jumbo built from source,
+BTCRecover via `uv run --with` (never pip-installed, never a repo
+venv). Fixes during reconciliation and review: `-tokenlist hits.jsonl`
+carve reads bounded by the remaining TokenlistMaxBytes budget in the
+read itself (`readCarveCapped`, small-limit `TestReadCarveCapped`);
+all-unreadable carves exit 1 (zero-coverage rule); foreign JSON used
+verbatim (`hitsShaped`); `-hashes` skip reasons on stderr
+(`ExtractHashesWithSkips`: unsupported cipher/KDF, presale
+out-of-scope) with `TestHashesCLI`; hashcat `--potfile-path` and
+john `--pot` run-local pots in the doc (never delete shared pots);
+the harness takes a WORKPARENT and runs in a fresh `mktemp -d`
+subdir instead of `rm -rf`-ing a caller path; john staging links
+run files excluding session state (bare-name john resolves home
+from CWD per jumbo path.c — there is no $JOHN override); the
+`wallet.dat` example split so the repo self-scan stays needle-free
+(test untouched); hashcat-mode map test; token length-boundary test.
+Infrastructure correction during verification: the local uv wrapper
+recursed (~950 nested `uv run` probes, 8GB swap) because the harness
+shadows it as `python3` on PATH and uv discovery re-executed the
+shadow — fixed by pinning uv to an absolute system interpreter in
+the wrapper plus a harness-side UV_PYTHON capture while the workdir
+is still empty, proven by a TasksMax=100-bounded smoke test resolving
+a real venv interpreter.
+Failure table rows are observed verbatim (John scrypt
+salt `strlen` truncation confirmed at ethereum_fmt_plug.c:175;
+corpus salts avoid 0x00); cost numbers re-measured by the parent
+(tokenlist recovery 15 s wall vs the doc's 16 s — agreement).
+
+**Execute:**
+1. Add CI jobs: John (Jumbo) + hashcat CPU + BTCRecover pip
+   install; cache aggressively, keep the corpus tiny.
+2. Generate tokenlists from hit context (nearby words,
+   mutations); verify end-to-end against a test wallet.
+3. Stamp the doc; document wrong-wallet-type errors + costs.
+
+**Non-goals:** cracking inside findbtc; new export formats
+without demand; GPU CI.
+
+**Verify:** CI jobs green; doc-commands test; gates.
+
+## Goal 34 — ETA + progress honesty for long scans
+
+**Pain to completely solve:** multi-hour scans print percent with
+no rate or remaining time; users cannot tell "slow" from "hung"
+(BTCRecover sets the ETA expectation). Cheap to fix, high
+perceived reliability.
+
+**Completely solved when:**
+- [ ] Stderr progress gains throughput + ETA (bytes/sec,
+      remaining) after a warmup window: stable (≤2 updates/sec,
+      monotonic remaining), documented line shape, still
+      parseable.
+- [ ] `-checkpoint` prints resume position on `-resume`
+      ("continuing at 41%").
+
+**Execute:**
+1. Add rate/ETA to the progress printer with a fake-clock-safe
+   design; golden progress tests.
+2. Resume-position line on -resume.
+3. Document the progress line contract.
+
+**Non-goals:** progress bars/TUI; changing -json; per-file ETAs
+in -walk (stretch only).
+
+**Verify:** golden tests; gates.
+
+## Goal 35 — Stdin scanning (pipe-first flows)
+
+**Pain to completely solve:** `dd | findbtc`, `ssh lab 'dd …' |
+findbtc`, cloud snapshots via pipes — none work; the tool
+demands seekable files/devices. Forensic triage over pipes and
+container-native flows are second-class without it.
+
+**Completely solved when:**
+- [ ] Raw scan + secrets profile accept `-` with byte-identical
+      detections vs file input (proven by test on fixtures).
+- [ ] Spill behavior documented (bounded spill file: where, how
+      big, cleanup); loud refusals for -fs/-walk/-checkpoint on
+      pipes.
+
+**Execute:**
+1. Stream with a bounded spill file; carve from the spill.
+2. File-vs-stdin identity tests; spill-cap tests.
+3. Docs: pipe recipes (dd/ssh), spill location/size, cleanup.
+
+**Non-goals:** seeking pipes (impossible); -fs/-walk on pipes;
+-resume on pipes; performance parity with files.
+
+**Verify:** identity + cap tests; gates.
+
+## Goal 36 — Git-history secrets via pipes
+
+**Pain to completely solve:** working-tree-only scanning misses
+committed-then-removed secrets — the actual leak shape — while
+gitleaks-license friction opens a wedge for a free offline
+alternative. Depends on Goal 35; do not implement before it.
+
+**Completely solved when:**
+- [ ] `git log -p` piped through stdin scanning attributes
+      findings to commit + path (patch headers parsed
+      dependency-free); baselines match across it.
+- [ ] Docs show the two-command history gate; demand check
+      recorded for native `git rev-list` walking (separate
+      future goal only if asked).
+
+**Execute:**
+1. Parse patch headers (commit/path/hunk) from the piped
+   stream; attribute detections.
+2. Baseline fingerprint shape for history findings.
+3. Docs + fixture repo test (leaked-then-removed secret).
+
+**Non-goals:** native git object parsing; PR-range logic (shell
+does ranges); auto-fix; anything before Goal 35 lands.
+
+**Verify:** fixture-repo test with commit attribution; gates.
+
+## Goal 37 — Homebrew tap + Windows managers
+
+**Pain to completely solve:** README apologizes to macOS users
+("no tap yet"); Windows users get archives and untested
+privilege UX. Every install-friction report starts here.
+Blocked on tap ownership (user decision).
+
+**Completely solved when:**
+- [ ] `brew install <tap>/findbtc` works from a layman's
+      terminal (smoked in CI on macos).
+- [ ] Windows story decided and documented: winget and/or
+      Scoop, or explicit "archives only, here's why"; install
+      docs show copy-paste per-OS commands, each executed in CI.
+
+**Execute:**
+1. Get tap ownership decision; create/point the tap.
+2. Decide Windows managers; write formulae/manifests.
+3. CI install smokes per OS; rewrite install docs.
+
+**Non-goals:** distro repos (Debian/Fedora inclusion);
+auto-update.
+
+**Verify:** CI smokes; gates.
+
+## Goal 38 — Multi-target scans + unified report
+
+**Pain to completely solve:** triaging 20 images means 20 shell
+loops, 20 JSON files, 20 case logs, hand-merged. Scripting
+copes; forensics reports do not.
+
+**Completely solved when:**
+- [ ] Multiple positionals and/or `-targets FILE` scan in one
+      run with one hits.jsonl (per-hit target already
+      recorded) and per-target case-log records.
+- [ ] Per-target failures follow Goal 31 rules (one bad image
+      neither zeroes the run nor lies); `-report` groups by
+      target.
+
+**Execute:**
+1. Accept N targets; loop with per-target record keeping.
+2. Apply coverage-honesty rules per target + overall exit.
+3. -report grouping; docs.
+
+**Non-goals:** parallel targets (measure first); glob expansion
+(shell does it).
+
+**Verify:** mixed good/bad batch fixture; gates.
+
+## Goal 39 — Completions + man page
+
+**Pain to completely solve:** 30 flags with no completion and no
+man page; `--help` (61 lines) is the whole story. Smallest pain
+in the queue; compounds if the surface keeps growing.
+
+**Completely solved when:**
+- [ ] bash/zsh/fish completions generated from the real flag
+      table (never hand-listed — test asserts every flag
+      present).
+- [ ] Man page generated from the same source, installed by
+      deb/rpm; the 3 orphan docs linked from SEE ALSO.
+
+**Execute:**
+1. Generate completions + man from one source of truth.
+2. Freshness test (every flag present); packaging install.
+3. Link orphans (BENCHMARKS, PIPELINE_INGEST, RESOURCE_BOUNDS).
+
+**Non-goals:** TUI; interactive help; new flags to justify it.
+
+**Verify:** freshness test; gates.
 
 ## Commit policy
 

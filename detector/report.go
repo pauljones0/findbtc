@@ -36,6 +36,13 @@ type OffsetSpan struct {
 	Max int64 `json:"max"`
 }
 
+// coverageNote separates "no detections" from "nothing scanned": an
+// empty hits file is the output of a clean scan AND of a scan that
+// read zero bytes, so the empty report names both readings and points
+// at the scan's own coverage evidence.
+const coverageNote = "an empty hits file is also what \"nothing was scanned\" looks like — " +
+	"confirm the scan covered its target (exit 0 with [COMPLETE] on stderr) before trusting a clean report"
+
 // Report is the full triage summary of a detection set.
 type Report struct {
 	Total           int                   `json:"total_detections"`
@@ -50,6 +57,9 @@ type Report struct {
 	Spans           map[string]OffsetSpan `json:"spans_by_target"`
 	Hits            []ReportHit           `json:"hits"`
 	Playbook        []string              `json:"playbook"`
+	// CoverageNote is set only when the input held no detections,
+	// warning machine consumers about the nothing-scanned ambiguity.
+	CoverageNote string `json:"coverage_note,omitempty"`
 }
 
 type walletClass struct {
@@ -172,7 +182,7 @@ var playbookSteps = map[string]string{
 	"unknown":                 "Unclassified hits: inspect the offsets manually.",
 }
 
-func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged, salvagedSuspect int) []string {
+func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged, salvagedSuspect int, hasNearMiss bool) []string {
 	if len(counts) == 0 {
 		return []string{"No wallet traces in this input — nothing to pursue."}
 	}
@@ -201,6 +211,9 @@ func buildPlaybook(counts map[string]int, encrypted, crackReady, salvaged, salva
 		}
 		steps = append(steps, note)
 	}
+	if hasNearMiss {
+		steps = append(steps, "Partial-seed (near-miss) hits present: with 1–2 words missing, re-run the scan with --reveal, then `findbtc -report hits.jsonl -complete --reveal` enumerates the checksum-valid completions offline (local terminal only; see docs/WHAT_NEXT.md).")
+	}
 	return steps
 }
 
@@ -223,12 +236,16 @@ func Summarize(dets []Detection) Report {
 	seen := map[dedupeKey]bool{}
 	spans := map[string]*OffsetSpan{}
 	targetSet := map[string]bool{}
+	hasNearMiss := false
 	for _, d := range dets {
 		k := dedupeKey{d.Target, d.Needle, d.Offset}
 		if seen[k] {
 			continue
 		}
 		seen[k] = true
+		if strings.Contains(d.Needle, "near-miss") {
+			hasNearMiss = true
+		}
 		c := classifyNeedle(d.Needle)
 		conf := c.confidence
 		if d.Needle == "pem-private-key" && !d.Verified {
@@ -276,6 +293,9 @@ func Summarize(dets []Detection) Report {
 	}
 	rep.Unique = len(rep.Hits)
 	rep.Duplicates = rep.Total - rep.Unique
+	if rep.Unique == 0 {
+		rep.CoverageNote = coverageNote
+	}
 	sort.Slice(rep.Hits, func(i, j int) bool {
 		if rep.Hits[i].Target != rep.Hits[j].Target {
 			return rep.Hits[i].Target < rep.Hits[j].Target
@@ -289,7 +309,7 @@ func Summarize(dets []Detection) Report {
 	for t, sp := range spans {
 		rep.Spans[t] = *sp
 	}
-	rep.Playbook = buildPlaybook(rep.Counts, rep.EncryptedHits, rep.CrackReady, rep.Salvaged, rep.SalvagedSuspect)
+	rep.Playbook = buildPlaybook(rep.Counts, rep.EncryptedHits, rep.CrackReady, rep.Salvaged, rep.SalvagedSuspect, hasNearMiss)
 	return rep
 }
 
@@ -301,6 +321,7 @@ func (r Report) Text() string {
 	var b strings.Builder
 	if r.Unique == 0 {
 		b.WriteString("Triage: no detections in this input — nothing to pursue.\n")
+		b.WriteString("Coverage note: " + coverageNote + ".\n")
 		return b.String()
 	}
 	targetWord := "targets"

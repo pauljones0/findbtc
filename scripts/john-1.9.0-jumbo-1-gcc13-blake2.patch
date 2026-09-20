@@ -1,0 +1,17 @@
+--- src/blake2.h.orig
++++ src/blake2.h
+@@ -84,6 +84,14 @@
+     uint8_t  buf[2 * BLAKE2B_BLOCKBYTES];
+     size_t   buflen;
+     uint8_t  last_node;
++    /* GCC >= 13 rejects blake2b_state S[4][1] below: the typedef carries
++       aligned(64) but the struct is 368 bytes, not a multiple of 64
++       ("size of array element is not a multiple of its alignment").
++       Pad to 384 bytes. Trailer bytes only; no code reads them and no
++       sizeof(blake2b_state) use exists in-tree, so hashes are unchanged.
++       Upstream reworked these structs on bleeding-jumbo instead; this
++       keeps the 1.9.0-jumbo-1 release intact apart from this trailer. */
++    uint8_t  padding[16];
+   } blake2b_state;
+ #if defined(JOHN_NO_SIMD) || (!defined(__SSE2__) && !defined(__SSE4_1__) && !defined(__XOP__))
+   typedef struct __blake2sp_state

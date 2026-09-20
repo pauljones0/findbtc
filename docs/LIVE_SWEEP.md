@@ -22,7 +22,9 @@ Add `-extract-dir ./carve` to keep bytes around each hit, and
 - **One unreadable file never aborts the sweep.** The path and error
   join the failure list (first 32 printed, all counted) and the sweep
   continues. The summary line reports files, detections, skips, and
-  failures; exit stays 0 when the sweep itself ran.
+  failures, plus a loud `WARNING` whenever any file failed. Exit
+  stays 0 once at least one file was scanned; a sweep that scanned
+  nothing (empty tree, every file failed) exits 1.
 - **The sweep skips its own output.** A carve directory or case-log
   file inside the walked tree is never scanned.
 - `-checkpoint`/`-resume` and `-s` are refused with `-walk`: a single

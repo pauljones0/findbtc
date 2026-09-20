@@ -150,6 +150,20 @@ func TestSummarizeEmpty(t *testing.T) {
 	}
 }
 
+func TestSummarizeEmptyNamesCoverage(t *testing.T) {
+	rep := Summarize(nil)
+	if !strings.Contains(rep.Text(), "nothing was scanned") {
+		t.Errorf("empty text must name the nothing-scanned ambiguity:\n%s", rep.Text())
+	}
+	if rep.CoverageNote == "" || !strings.Contains(rep.CoverageNote, "nothing was scanned") {
+		t.Errorf("empty report must carry a machine-readable coverage note: %+v", rep)
+	}
+	nonempty := Summarize([]Detection{reportFixtureDetection("bestblock", "/dev/sda", 10)})
+	if nonempty.CoverageNote != "" {
+		t.Errorf("non-empty report must not carry a coverage note: %q", nonempty.CoverageNote)
+	}
+}
+
 func TestReportDropsDescriptions(t *testing.T) {
 	d := reportFixtureDetection("wif", "/dev/sda", 10)
 	d.Words = []string{"abandon", "about", "zoo"}

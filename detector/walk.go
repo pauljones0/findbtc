@@ -179,9 +179,10 @@ func (w *walker) scanFile(path string) error {
 	if err := w.wopts.Scan.scanContext().Err(); err != nil {
 		return err
 	}
-	// The pipeline logs an unreadable target but still reports
-	// completion, so probe readability here to keep Failed honest:
-	// a sweep must never silently claim coverage it did not get.
+	// The pipeline reports an unreadable target as an error, but
+	// probe readability first anyway: an unopenable file must land in
+	// Failed without counting as scanned, so a sweep never silently
+	// claims coverage it did not get.
 	if f, err := os.Open(path); err != nil {
 		w.stats.fail(path, err)
 		return nil

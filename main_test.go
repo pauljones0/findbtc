@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -64,5 +65,74 @@ func TestProgressReporterShowsRateAndETA(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected progress output to contain %q, got:\n%s", want, out)
 		}
+	}
+}
+
+// Carve reads behind -tokenlist hits.jsonl must respect the byte budget
+// in the read itself: carves bypass the initial LimitReader, so a
+// whole-file read before the cap check would let one oversized carve
+// OOM first. Small injected limits prove the reader/budget path
+// without allocating gigabytes.
+func TestReadCarveCapped(t *testing.T) {
+	dir := t.TempDir()
+	full := filepath.Join(dir, "full.bin")
+	if err := os.WriteFile(full, []byte("abcdefgh"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// Under budget: everything, no overflow.
+	kept, overflow, err := readCarveCapped(full, 8)
+	if err != nil || overflow || string(kept) != "abcdefgh" {
+		t.Fatalf("exact fit: kept=%q overflow=%v err=%v", kept, overflow, err)
+	}
+	kept, overflow, err = readCarveCapped(full, 20)
+	if err != nil || overflow || string(kept) != "abcdefgh" {
+		t.Fatalf("headroom: kept=%q overflow=%v err=%v", kept, overflow, err)
+	}
+	// Over budget: truncated to max, overflow set, never more kept.
+	kept, overflow, err = readCarveCapped(full, 5)
+	if err != nil || !overflow || string(kept) != "abcde" {
+		t.Fatalf("overflow: kept=%q overflow=%v err=%v", kept, overflow, err)
+	}
+	// Zero budget: nothing kept, still reports overflow, tiny alloc.
+	kept, overflow, err = readCarveCapped(full, 0)
+	if err != nil || !overflow || len(kept) != 0 {
+		t.Fatalf("zero budget: kept=%q overflow=%v err=%v", kept, overflow, err)
+	}
+	// Missing file errors instead of returning empty bytes.
+	if _, _, err = readCarveCapped(filepath.Join(dir, "absent.bin"), 8); err == nil {
+		t.Fatal("missing carve must error")
+	}
+	// Empty file: no bytes, no overflow, no error.
+	empty := filepath.Join(dir, "empty.bin")
+	if err := os.WriteFile(empty, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	kept, overflow, err = readCarveCapped(empty, 8)
+	if err != nil || overflow || len(kept) != 0 {
+		t.Fatalf("empty: kept=%q overflow=%v err=%v", kept, overflow, err)
+	}
+}
+
+// The follow-up crack commands after -hashes must name the right
+// hashcat mode per wallet kind: a swapped -m would fail loudly in a
+// cracker, but only after the owner trusted our suggestion.
+func TestHashCommands(t *testing.T) {
+	if cmds := hashCommands(nil); len(cmds) != 0 {
+		t.Fatalf("no hashes: cmds = %q", cmds)
+	}
+	cmds := hashCommands([]detector.CrackHash{
+		{Format: "bitcoin-core-mkey"},
+		{Format: "ethereum-keystore", KDF: "scrypt"},
+		{Format: "ethereum-keystore", KDF: "pbkdf2-hmac-sha256"},
+		{Format: "bitcoin-core-mkey"}, // twin dedupes
+		{Format: "unknown-thing"},     // ignored
+	})
+	want := []string{
+		"hashcat -m 11300 hashes.txt passwords.txt",
+		"hashcat -m 15700 hashes.txt passwords.txt",
+		"hashcat -m 15600 hashes.txt passwords.txt",
+	}
+	if strings.Join(cmds, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("cmds = %q\nwant %q", cmds, want)
 	}
 }

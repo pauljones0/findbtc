@@ -84,9 +84,16 @@ never scans:
 
 Detections print to stdout; logs, progress and the final `[COMPLETE]` line go
 to stderr, so `-json` output stays parseable. Exit codes are a contract:
-0 the run completed (hits or not), 1 runtime error, 2 bad flags/usage,
-3 hits found — but only with `-fail-on-hit`, which gates CI and
-pre-commit hooks (see [docs/SECRETS_PROFILE.md](docs/SECRETS_PROFILE.md)).
+
+| Code | Meaning |
+| ---- | ------- |
+| 0 | The run completed and covered its target — hits or not. A `-walk` that scanned at least one file exits 0 even when other files failed (failures print loudly). |
+| 1 | Runtime error or zero coverage: the root target could not be read (missing, unreadable, vanished mid-run), or a `-walk` scanned nothing at all. The reason is on stderr. |
+| 2 | Bad flags/usage. |
+| 3 | Hits found — but only with `-fail-on-hit`, which gates CI and pre-commit hooks (see [docs/SECRETS_PROFILE.md](docs/SECRETS_PROFILE.md)). |
+
+A bad nested archive inside a readable root stays a warning (exit 0):
+only the root target can fail the run.
 The line shape is a versioned
 contract: [schema/hits-v1.json](schema/hits-v1.json), documented in
 [docs/HITS_SCHEMA.md](docs/HITS_SCHEMA.md). Each carved hit lands in
@@ -108,7 +115,10 @@ counts with duplicates merged, per-hit confidence, encryption flags,
 byte-offset spans per target, and prioritized next steps. `-report -`
 reads from stdin; add `-json` for the machine-readable report. Like the
 scanner, the report prints type labels only — never key or seed material.
-If the hits are yours and you don't know what to do next, read
+An empty hits file gets a coverage note instead of a clean bill of
+health: "no detections" is only trustworthy when the scan covered its
+target (exit 0 with `[COMPLETE]` on stderr). If the hits are yours
+and you don't know what to do next, read
 [docs/WHAT_NEXT.md](docs/WHAT_NEXT.md) before anything else.
 
 > **SCAM SHIELD.** Fake "recovery services" target people who just
@@ -125,9 +135,15 @@ carve or wallet copy (never the scanned device itself):
     findbtc -hashes ./carve/hit-000001.bin
 
 Scans with `-extract-dir` already attach any `hashes` found in each carve
-to the detection and its sidecar. See
-[docs/PASSWORD_RECOVERY.md](docs/PASSWORD_RECOVERY.md) for the end-to-end
-runbook (hashcat, John the Ripper, BTCRecover).
+to the detection and its sidecar. When the password is only half
+remembered, `-tokenlist` turns the words near a hit into a starting
+BTCRecover tokenlist (case mutations included):
+
+    findbtc -tokenlist ./carve/hit-000001.bin -tokenlist-out tokens.txt
+
+See [docs/PASSWORD_RECOVERY.md](docs/PASSWORD_RECOVERY.md) for the
+end-to-end runbook (hashcat, John the Ripper, BTCRecover) — every
+command there runs verbatim in CI against real tools.
 
 ### Near-miss seed phrases
 
@@ -147,10 +163,22 @@ self-scan expects hits there and on fixtures.
 
 Owner recovery can print the actual words with `--reveal`, which attaches
 them to BIP39 detections (stdout `-json` included) after a loud warning.
-Never share, paste, or log `--reveal` output. For reordering a scrambled
-phrase or brute-forcing several missing words, take the carve to
-[BTCRecover](https://github.com/3rdIteration/btcrecover), which searches
-permutations and word combinations that a scanner cannot disambiguate.
+Never share, paste, or log `--reveal` output.
+
+One or two words missing or smudged is enumerable offline
+(checksum-gated, most-likely first, with typo correction) as a
+`-report` follow-up — no new mode:
+
+    findbtc --reveal -json ./carve/hit-000001.bin > near.jsonl
+    findbtc -report near.jsonl -complete --reveal -complete-out keys.txt
+    findbtc -watch keys.txt -watch-out addrs.csv
+
+Candidates print on the local terminal only; the keys file (watch-only
+account keys, never phrases) feeds `-watch` with no copy-paste. Past
+two missing words the tool refuses loudly and points at
+[BTCRecover](https://github.com/3rdIteration/btcrecover), which also
+owns scrambled-phrase reordering. Full recipe and stop rules:
+[docs/WHAT_NEXT.md](docs/WHAT_NEXT.md).
 
 ### Fragment salvage
 

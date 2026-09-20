@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,6 +121,174 @@ func TestFailOnHitMatrix(t *testing.T) {
 	}
 }
 
+// The coverage-honesty contract (Goal 31): a scan whose ROOT target
+// fails exits 1 with the reason on stderr; a -walk that scanned
+// nothing exits 1; a bad nested archive inside a good root stays a
+// warning with exit 0; -report names the empty-input ambiguity.
+func TestCoverageExitMatrix(t *testing.T) {
+	dir := t.TempDir()
+	clean := writeGateFile(t, dir, "clean.txt", "hello prose, nothing to find here\n")
+	dirty := writeGateFile(t, dir, "dirty.bin", "padding bestblock padding\n")
+	empty := writeGateFile(t, dir, "empty.bin", "")
+	nested := writeCorruptZipRoot(t, dir, "nested.bin")
+
+	// chmod-000 only bites on enforcing platforms; where the probe
+	// open succeeds (Windows/root) the permission cases cannot run.
+	noperm := writeGateFile(t, dir, "noperm.bin", "bestblock but unreadable\n")
+	canEnforce := true
+	if err := os.Chmod(noperm, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(noperm, 0644) })
+	if f, err := os.Open(noperm); err == nil {
+		f.Close()
+		canEnforce = false
+		t.Log("platform reads chmod-000 files; permission cases skipped")
+	}
+
+	allFailed := t.TempDir()
+	for _, n := range []string{"a.bin", "b.bin"} {
+		p := writeGateFile(t, allFailed, n, "bestblock but unreadable\n")
+		if err := os.Chmod(p, 0000); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Chmod(p, 0644)
+	}
+	partialDir := t.TempDir()
+	writeGateFile(t, partialDir, "good.txt", "residue defaultkey tail\n")
+	partialBad := writeGateFile(t, partialDir, "bad.txt", "bestblock but unreadable\n")
+	if err := os.Chmod(partialBad, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(partialBad, 0644)
+	nestedDir := t.TempDir()
+	nestedCopy, err := os.ReadFile(nested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeGateFile(t, nestedDir, "nested.bin", string(nestedCopy))
+	emptyDir := t.TempDir()
+	emptyHits := writeGateFile(t, dir, "empty.jsonl", "")
+
+	cases := []struct {
+		name       string
+		args       []string
+		want       int
+		needsPerms bool
+	}{
+		// Root-target failure is exit 1, never a silent success.
+		{"chmod-000 root scan", []string{noperm}, 1, true},
+		{"all-failed walk", []string{"-walk", allFailed}, 1, true},
+		{"empty-dir walk scans nothing", []string{"-walk", emptyDir}, 1, false},
+		// Nested-target tolerance is unchanged: still 0.
+		{"nested corrupt archive scan", []string{"-json", nested}, 0, false},
+		{"nested corrupt archive walk", []string{"-walk", nestedDir}, 0, false},
+		// Normal scans are unchanged.
+		{"clean scan", []string{clean}, 0, false},
+		{"dirty scan default", []string{dirty}, 0, false},
+		{"empty file scan", []string{empty}, 0, false},
+		{"partial-failure walk", []string{"-walk", partialDir}, 0, false},
+		{"report empty", []string{"-report", emptyHits}, 0, false},
+	}
+	for _, c := range cases {
+		if c.needsPerms && !canEnforce {
+			continue
+		}
+		_, stderr, exit := runTestBinary(t, c.args...)
+		if exit != c.want {
+			t.Errorf("%s: exit %d, want %d (stderr: %s)", c.name, exit, c.want, firstLine(stderr))
+		}
+	}
+
+	// The root failure names its reason on stderr.
+	if canEnforce {
+		_, stderr, _ := runTestBinary(t, noperm)
+		if !strings.Contains(stderr, "Exiting due to error") {
+			t.Errorf("root failure must exit loudly, got: %s", firstLine(stderr))
+		}
+		if !strings.Contains(stderr, "permission denied") {
+			t.Errorf("root failure must name the reason, got: %s", firstLine(stderr))
+		}
+		// The zero-coverage walk says what happened, not just a code.
+		_, stderr, _ = runTestBinary(t, "-walk", allFailed)
+		if !strings.Contains(stderr, "nothing was covered") {
+			t.Errorf("zero-coverage walk must say so, got: %s", firstLine(stderr))
+		}
+		// Partial failure stays 0 but is loud.
+		_, stderr, _ = runTestBinary(t, "-walk", partialDir)
+		if !strings.Contains(stderr, "WARNING") || !strings.Contains(stderr, "coverage is incomplete") {
+			t.Errorf("partial-failure walk must warn loudly, got: %s", firstLine(stderr))
+		}
+	}
+
+	// Nested tolerance proof: the root needle still reports, the
+	// nested failure still warns, the exit stays 0.
+	stdout, stderr, exit := runTestBinary(t, "-json", nested)
+	if exit != 0 {
+		t.Errorf("nested tolerance: exit %d, want 0 (stderr: %s)", exit, firstLine(stderr))
+	}
+	if !strings.Contains(stdout, "bestblock") {
+		t.Errorf("nested tolerance: root needle lost (stdout: %s)", firstLine(stdout))
+	}
+	if !strings.Contains(stderr, "Unable to scan target") {
+		t.Errorf("nested tolerance: nested failure must still warn (stderr: %s)", firstLine(stderr))
+	}
+
+	// -report distinguishes "no detections" from "nothing scanned".
+	stdout, _, _ = runTestBinary(t, "-report", emptyHits)
+	if !strings.Contains(stdout, "nothing to pursue") {
+		t.Errorf("empty report lost its verdict (stdout: %s)", firstLine(stdout))
+	}
+	if !strings.Contains(stdout, "nothing was scanned") {
+		t.Errorf("empty report must name the nothing-scanned ambiguity (stdout: %s)", firstLine(stdout))
+	}
+}
+
+// writeCorruptZipRoot builds the nested-tolerance fixture: a root file
+// carrying a live needle plus a zip whose headers are intact but whose
+// member data is corrupt. The member publishes (headers parse) then
+// fails at inflate (nested warning, tolerated). Corruption is verified
+// with archive/zip itself: NewReader must succeed, member read must fail.
+func writeCorruptZipRoot(t *testing.T, dir, name string) string {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create("member.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200; i++ {
+		fmt.Fprintf(w, "member line %04d with varied payload text %d\n", i, i*7919)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw := buf.Bytes()
+	// Local header (30 bytes) + "member.txt" (10 bytes): deflated data
+	// starts at 40. Corrupt inside the data, far from the ECD/central
+	// directory at the tail.
+	if len(raw) < 120 {
+		t.Fatalf("zip fixture too small (%d bytes) to corrupt safely", len(raw))
+	}
+	for _, off := range []int{48, 52, 56, 60} {
+		raw[off] ^= 0xff
+	}
+	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
+	if err != nil {
+		t.Fatalf("fixture headers must stay intact: %v", err)
+	}
+	rc, err := zr.File[0].Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.ReadAll(rc); err == nil {
+		t.Fatal("fixture member must fail to inflate")
+	}
+	rc.Close()
+	root := append([]byte("root needle bestblock above the archive\n"), raw...)
+	return writeGateFile(t, dir, name, string(root))
+}
+
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		return s[:i]
@@ -181,6 +352,372 @@ func TestPreCommitSample(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "not committing") {
 		t.Errorf("hook must explain the block, got: %s", firstLine(stderr))
+	}
+}
+
+// The -report -complete contract (Goal 32): a follow-up, not a mode.
+// Flag misuse exits 2; a smudged-word file completes end to end with
+// the original word among the candidates; crafted 3-gap input refuses
+// loudly toward BTCRecover; -complete-out feeds -watch with no
+// copy-paste.
+func TestCompleteCLI(t *testing.T) {
+	dir := t.TempDir()
+	// Smudged-paper recipe: 11 known words + xxxx placeholder.
+	smudged := writeGateFile(t, dir, "smudged.txt",
+		"abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon xxxx\n")
+	cmd := exec.Command(testBinary, "--reveal", "-json", smudged)
+	raw, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("cannot generate completion fixture: %v", err)
+	}
+	if !strings.Contains(string(raw), "near-miss") {
+		t.Fatalf("smudged fixture must scan as near-miss, got: %s", firstLine(string(raw)))
+	}
+	hits := writeGateFile(t, dir, "hits.jsonl", string(raw))
+
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"complete without report", []string{"-complete", "--reveal"}, 2},
+		{"complete-out without complete", []string{"-report", hits, "-complete-out", "k.txt"}, 2},
+		{"complete without reveal", []string{"-report", hits, "-complete"}, 2},
+		{"complete with json", []string{"-report", hits, "-complete", "--reveal", "-json"}, 2},
+		{"complete-max zero", []string{"-report", hits, "-complete", "--reveal", "-complete-max", "0"}, 2},
+		{"complete-max huge", []string{"-report", hits, "-complete", "--reveal", "-complete-max", "99999"}, 2},
+		{"complete happy path", []string{"-report", hits, "-complete", "--reveal", "-complete-max", "5"}, 0},
+	}
+	for _, c := range cases {
+		_, stderr, exit := runTestBinary(t, c.args...)
+		if exit != c.want {
+			t.Errorf("%s: exit %d, want %d (stderr: %s)", c.name, exit, c.want, firstLine(stderr))
+		}
+	}
+	_, stderr, _ := runTestBinary(t, "-report", hits, "-complete")
+	if !strings.Contains(stderr, "--reveal") {
+		t.Errorf("missing---reveal refusal must name --reveal, got: %s", firstLine(stderr))
+	}
+	// End to end: the original 12th word ("about") is among the
+	// candidates, most-likely first, with the scam shield on stderr.
+	stdout, stderr, _ := runTestBinary(t, "-report", hits, "-complete", "--reveal")
+	if !strings.Contains(stdout, "128 checksum-valid completions") {
+		t.Errorf("completion must report the oracle total 128, got: %s", firstLine(stdout))
+	}
+	if !strings.Contains(stdout, "candidate 1: abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about") {
+		t.Errorf("head candidate must restore the phrase, got: %s", firstLine(stdout))
+	}
+	for _, want := range []string{"SCAM SHIELD", "local terminal"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr lacks %q: %s", want, firstLine(stderr))
+		}
+	}
+	// Crafted 3-gap input refuses loudly toward BTCRecover, exit 0
+	// (completed triage, like "no crack material").
+	refusal := writeGateFile(t, dir, "refusal.jsonl",
+		`{"description":"Found 'bip39-12-near-miss gaps=[0,1,2]' at x","needle":"bip39-12-near-miss","offset":0,"target":"x","block_offset":0,"match_length":10,"words":["xxxx","xxxx","xxxx","abandon","abandon","abandon","abandon","abandon","abandon","abandon","abandon","abandon"]}`+"\n")
+	stdout, _, exit := runTestBinary(t, "-report", refusal, "-complete", "--reveal")
+	if exit != 0 {
+		t.Errorf("refusal exit %d, want 0", exit)
+	}
+	for _, want := range []string{"REFUSED", "BTCRecover", "GPU"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("refusal lacks %q: %s", want, firstLine(stdout))
+		}
+	}
+	// Handoff: -complete-out keys feed -watch with no copy-paste.
+	keys := filepath.Join(dir, "keys.txt")
+	addrs := filepath.Join(dir, "addrs.csv")
+	_, _, exit = runTestBinary(t, "-report", hits, "-complete", "--reveal", "-complete-max", "2", "-complete-out", keys)
+	if exit != 0 {
+		t.Fatalf("complete-out exit %d", exit)
+	}
+	keysRaw, err := os.ReadFile(keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(keysRaw), "# candidate "); n != 2 {
+		t.Errorf("keys file holds %d candidate blocks, want 2", n)
+	}
+	for _, prefix := range []string{"xpub", "ypub", "zpub"} {
+		if !strings.Contains(string(keysRaw), prefix) {
+			t.Errorf("keys file lacks %s keys", prefix)
+		}
+	}
+	if strings.Contains(string(keysRaw), "abandon") {
+		t.Error("keys file must never hold phrase words")
+	}
+	_, stderr, exit = runTestBinary(t, "-watch", keys, "-watch-out", addrs)
+	if exit != 0 {
+		t.Fatalf("watch handoff exit %d (stderr: %s)", exit, firstLine(stderr))
+	}
+	addrsRaw, err := os.ReadFile(addrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(addrsRaw)), "\n")
+	if len(lines) != 1+6*2*20 { // header + 6 keys x 2 chains x 20
+		t.Errorf("handoff derived %d CSV rows, want %d", len(lines), 1+6*2*20)
+	}
+}
+
+// The -tokenlist contract (Goal 33): flag misuse exits 2; a context file
+// yields the golden tokenlist on stdout or -tokenlist-out; hits.jsonl
+// with carves reads through to the carve bytes; empty input is a
+// completed answer (exit 0), like "No crack material found". The real
+// BTCRecover crack runs in CI (scripts/password-handoff.sh); this pins
+// the CLI side of that contract.
+func TestTokenlistCLI(t *testing.T) {
+	dir := t.TempDir()
+	ctx := writeGateFile(t, dir, "ctx.bin", "\x00kern river 2019\x00")
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"out without tokenlist", []string{"-tokenlist-out", "t.txt"}, 2},
+		{"max without tokenlist", []string{"-tokenlist-max", "5"}, 2},
+		{"max zero", []string{"-tokenlist", ctx, "-tokenlist-max", "0"}, 2},
+		{"max huge", []string{"-tokenlist", ctx, "-tokenlist-max", "100001"}, 2},
+		{"missing file", []string{"-tokenlist", filepath.Join(dir, "absent.bin")}, 1},
+		{"happy path", []string{"-tokenlist", ctx}, 0},
+	}
+	for _, c := range cases {
+		_, stderr, exit := runTestBinary(t, c.args...)
+		if exit != c.want {
+			t.Errorf("%s: exit %d, want %d (stderr: %s)", c.name, exit, c.want, firstLine(stderr))
+		}
+	}
+	want := "# findbtc tokenlist: 3 base words, one line each.\n" +
+		"# Same-line tokens are mutually exclusive variants; tune --max-tokens.\n" +
+		"kern KERN Kern\nriver RIVER River\n2019\n"
+	stdout, _, _ := runTestBinary(t, "-tokenlist", ctx)
+	if stdout != want {
+		t.Errorf("stdout = %q, want %q", stdout, want)
+	}
+	out := filepath.Join(dir, "tokens.txt")
+	stdout, _, exit := runTestBinary(t, "-tokenlist", ctx, "-tokenlist-out", out)
+	if exit != 0 {
+		t.Fatalf("tokenlist-out exit %d", exit)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != want {
+		t.Errorf("file = %q, want %q", raw, want)
+	}
+	if !strings.Contains(stdout, "Wrote 3 token lines") || !strings.Contains(stdout, "btcrecover.py") {
+		t.Errorf("file mode must report + point at BTCRecover, got: %s", firstLine(stdout))
+	}
+	// Truncation warns on stderr and cuts whole lines.
+	_, stderr, _ := runTestBinary(t, "-tokenlist", ctx, "-tokenlist-max", "2")
+	if !strings.Contains(stderr, "showing first 2") {
+		t.Errorf("truncation must warn, got: %s", firstLine(stderr))
+	}
+	// Empty input completes (exit 0), like -hashes with no material.
+	empty := writeGateFile(t, dir, "empty.bin", "\x00\x01 a bb")
+	stdout, _, exit = runTestBinary(t, "-tokenlist", empty)
+	if exit != 0 || !strings.Contains(stdout, "No token words found") {
+		t.Errorf("empty: exit %d stdout %q", exit, firstLine(stdout))
+	}
+	// hits.jsonl with a carve reads through to the carve bytes.
+	carve := writeGateFile(t, dir, "carve.bin", "quiet harbor pilot static")
+	hits := writeGateFile(t, dir, "hits.jsonl",
+		`{"description":"d","needle":"bestblock","offset":0,"target":"t","block_offset":0,"match_length":8,"carve_path":"`+carve+`"}`+"\n")
+	stdout, _, exit = runTestBinary(t, "-tokenlist", hits)
+	if exit != 0 {
+		t.Fatalf("hits.jsonl exit %d", exit)
+	}
+	if !strings.Contains(stdout, "harbor HARBOR Harbor") || !strings.Contains(stdout, "pilot PILOT Pilot") {
+		t.Errorf("hits.jsonl must read carve bytes, got:\n%s", stdout)
+	}
+	// hits.jsonl without carves errors loudly (mirrors -watch).
+	nocarve := writeGateFile(t, dir, "nocarve.jsonl",
+		`{"description":"d","needle":"bestblock","offset":0,"target":"t","block_offset":0,"match_length":8}`+"\n")
+	_, stderr, exit = runTestBinary(t, "-tokenlist", nocarve)
+	if exit != 1 || !strings.Contains(stderr, "no carve paths") {
+		t.Errorf("carveless hits: exit %d stderr %q", exit, firstLine(stderr))
+	}
+}
+
+// The -hashes contract (Goal 33): crack-ready hashes on stdout, skip
+// reasons on stderr (stdout stays a pure hash list in both modes),
+// exit 0 throughout — only I/O failures exit 1.
+func TestHashesCLI(t *testing.T) {
+	dir := t.TempDir()
+	// Happy path: the committed BDB mkey fixture exports one hash.
+	stdout, stderr, exit := runTestBinary(t, "-hashes", filepath.Join("testdata", "password-handoff", "core-bdb-mkey.bin"))
+	if exit != 0 {
+		t.Fatalf("happy path exit %d (stderr: %s)", exit, firstLine(stderr))
+	}
+	if !strings.Contains(stdout, "$bitcoin$") {
+		t.Errorf("happy path must print the hash, got: %s", firstLine(stdout))
+	}
+	if strings.Contains(stderr, "skipped") {
+		t.Errorf("happy path must not report skips, got: %s", firstLine(stderr))
+	}
+	// Unsupported-but-complete keystore: generic stdout plus a stderr
+	// reason naming the cipher — never silent, never a bogus hash.
+	bad := writeGateFile(t, dir, "cbc.json",
+		`{"address":"de0b295669a9fd93d5f28d9ec85e40f4cb697bae",`+
+			`"crypto":{"cipher":"aes-256-cbc","ciphertext":"ab12","cipherparams":{"iv":"00112233445566778899aabbccddeeff"},`+
+			`"kdf":"pbkdf2","kdfparams":{"dklen":32,"c":4096,"prf":"hmac-sha256","salt":"aabbccdd"},`+
+			`"mac":"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"},`+
+			`"id":"00000000-0000-4000-8000-000000000000","version":3}`)
+	stdout, stderr, exit = runTestBinary(t, "-hashes", bad)
+	if exit != 0 || !strings.Contains(stdout, "No crack material found") {
+		t.Errorf("unsupported cipher: exit %d stdout %q", exit, firstLine(stdout))
+	}
+	if want := `skipped ethereum-keystore @0: unsupported cipher "aes-256-cbc"`; !strings.Contains(stderr, want) {
+		t.Errorf("unsupported cipher must explain on stderr, got: %q", firstLine(stderr))
+	}
+	// Presale: detected as out of scope.
+	pre := writeGateFile(t, dir, "presale.json",
+		`{"encseed":"00112233445566778899aabbccddeeff","ethaddr":"de0b295669a9fd93d5f28d9ec85e40f4cb697bae",`+
+			`"bkp":"00112233445566778899aabbccddeeff","email":"owner@example.com"}`)
+	stdout, stderr, exit = runTestBinary(t, "-hashes", pre)
+	if exit != 0 || !strings.Contains(stdout, "No crack material found") {
+		t.Errorf("presale: exit %d stdout %q", exit, firstLine(stdout))
+	}
+	if !strings.Contains(stderr, "skipped ethereum-presale") || !strings.Contains(stderr, "out of scope") {
+		t.Errorf("presale must be detected as out of scope, got: %q", firstLine(stderr))
+	}
+	// -json keeps the pure-array shape; the skip still rides stderr.
+	stdout, stderr, exit = runTestBinary(t, "-hashes", bad, "-json")
+	if exit != 0 {
+		t.Fatalf("json exit %d", exit)
+	}
+	if strings.TrimSpace(stdout) != "[]" {
+		t.Errorf("json with no hashes must be [], got: %q", firstLine(stdout))
+	}
+	if !strings.Contains(stderr, "skipped ethereum-keystore") {
+		t.Errorf("json mode must still explain skips, got: %q", firstLine(stderr))
+	}
+	// Missing file is the only loud failure.
+	_, _, exit = runTestBinary(t, "-hashes", filepath.Join(dir, "absent.bin"))
+	if exit != 1 {
+		t.Errorf("missing file exit %d, want 1", exit)
+	}
+}
+
+// Carves that all fail to read fail the run (exit 1): zero bytes
+// scanned is blindness, not the "No token words found" success.
+func TestTokenlistAllCarvesUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	hits := writeGateFile(t, dir, "dead.jsonl",
+		`{"description":"d","needle":"bestblock","offset":0,"target":"t","block_offset":0,"match_length":8,"carve_path":"`+filepath.Join(dir, "absent.bin")+`"}`+"\n")
+	stdout, stderr, exit := runTestBinary(t, "-tokenlist", hits)
+	if exit != 1 {
+		t.Fatalf("all-unreadable carves exit %d, want 1 (stdout %q)", exit, firstLine(stdout))
+	}
+	if !strings.Contains(stderr, "none could be read") {
+		t.Errorf("must name the failure, stderr: %q", firstLine(stderr))
+	}
+}
+
+// Foreign JSON that merely parses is used verbatim, not refused as
+// carveless hits: Detection has no required fields, so shape (any
+// description/needle/target) is what marks real hits.jsonl.
+func TestTokenlistForeignJSONVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	foreign := writeGateFile(t, dir, "s.json", "{\"abc\": 1}\n")
+	stdout, _, exit := runTestBinary(t, "-tokenlist", foreign)
+	if exit != 0 {
+		t.Fatalf("foreign JSON exit %d, want 0", exit)
+	}
+	if !strings.Contains(stdout, "abc ABC Abc") {
+		t.Errorf("foreign JSON must extract words verbatim, got:\n%s", stdout)
+	}
+}
+
+// The doc-commands contract (Goal 33): every ```sh line in
+// docs/PASSWORD_RECOVERY.md must be shaped to run verbatim under
+// scripts/password-handoff.sh (same fence convention, known lead tool,
+// no continuations, no output leaks), the harness must actually read
+// those fences, CI must invoke the harness in a `password-handoff` job,
+// and the doc's version stamp must match the CI pins. The real
+// execution happens in CI; this test pins the wiring in-repo.
+func TestPasswordRecoveryDocCommands(t *testing.T) {
+	doc, err := os.ReadFile("docs/PASSWORD_RECOVERY.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cmds []string
+	inBlock := false
+	for _, line := range strings.Split(string(doc), "\n") {
+		switch {
+		case line == "```sh":
+			if inBlock {
+				t.Fatal("nested ```sh fence")
+			}
+			inBlock = true
+		case line == "```":
+			inBlock = false
+		case inBlock:
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			cmds = append(cmds, line)
+		}
+	}
+	if inBlock {
+		t.Fatal("unclosed ```sh fence")
+	}
+	if len(cmds) < 20 {
+		t.Fatalf("only %d doc commands; the runbook must stay executable", len(cmds))
+	}
+	for _, c := range cmds {
+		lead := strings.SplitN(c, " ", 2)[0]
+		switch lead {
+		case "findbtc", "hashcat", "john", "python3":
+		default:
+			t.Errorf("doc command has unknown lead tool %q: %s", lead, c)
+		}
+		if strings.HasSuffix(c, "\\") {
+			t.Errorf("doc command uses continuations (harness runs one line at a time): %s", c)
+		}
+		if strings.HasPrefix(c, "$") {
+			t.Errorf("doc sh block leaks output, not a command: %s", c)
+		}
+	}
+	harness, err := os.ReadFile("scripts/password-handoff.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(harness), "^```sh$") {
+		t.Error("harness lost its ```sh fence extraction")
+	}
+	// Bare-name john takes conf AND pot from the CWD, so the harness
+	// must link run files excluding prior session state — otherwise a
+	// replayed run passes the crack assertions without cracking.
+	if !strings.Contains(string(harness), "*.pot*|*.log*|*.rec") {
+		t.Error("harness lost its john pot isolation")
+	}
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"password-handoff", "scripts/password-handoff.sh"} {
+		if !strings.Contains(string(ci), want) {
+			t.Errorf("ci.yml lost %q", want)
+		}
+	}
+	// The stamp names the pinned tools: CI pins are the source of
+	// truth, the doc repeats them, and the harness re-checks both.
+	pins := map[string]string{
+		"JOHN_VERSION: '":        "1.9.0-jumbo-1",
+		"HASHCAT_VERSION: '":     "6.2.6",
+		"BTCR_SHA: '":            "1457088",
+		"ETH_KEYFILE_VERSION: '": "0.6.0",
+	}
+	for key, want := range pins {
+		if !strings.Contains(string(ci), key+want) {
+			t.Errorf("ci.yml lost pin %s%s", key, want)
+		}
+		if !strings.Contains(string(doc), want) {
+			t.Errorf("doc stamp lost %q (pin %s)", want, key)
+		}
 	}
 }
 

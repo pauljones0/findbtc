@@ -385,6 +385,31 @@ func TestResumeFromCheckpointSkipsScannedBytes(t *testing.T) {
 	}
 }
 
+// An unreadable root target is a hard error, not a silent empty scan:
+// the pipeline used to log a warning and report completion.
+func TestScanUnreadableRootReturnsError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "noperm.bin")
+	if err := os.WriteFile(path, []byte("bestblock but unreadable\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0644) })
+	if f, err := os.Open(path); err == nil {
+		f.Close()
+		t.Skip("platform reads chmod-000 files (Windows/root)")
+	}
+	recorder := &detectionRecorder{}
+	err := detector.Scan(0, path, recorder.OnDetection, recorder.OnProgress)
+	if err == nil {
+		t.Fatal("expected an error scanning an unreadable root, got nil")
+	}
+	if len(recorder.detections) != 0 {
+		t.Errorf("expected no detections, got %v", recorder.detections)
+	}
+}
+
 // A missing root target is a hard error, not a silent empty scan.
 func TestScanMissingPathReturnsError(t *testing.T) {
 	recorder := &detectionRecorder{}

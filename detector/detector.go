@@ -219,6 +219,11 @@ type Options struct {
 	// rangeCtx carries range-journal state into runPipeline; set by
 	// ScanRangesWithOptions, never by callers.
 	rangeCtx *rangeJournalCtx
+	// strictRoot makes runPipeline return an error when the root
+	// target fails or covers zero bytes (coverage honesty). Only
+	// ScanWithOptions sets it: range scans keep per-range tolerance,
+	// and nested targets always stay warn-and-continue.
+	strictRoot bool
 	// Reveal, when true, attaches seed-phrase words to BIP39 detections
 	// (owner recovery only). Default output never contains words.
 	Reveal bool
@@ -325,6 +330,10 @@ func Scan(startOffset int64, path string, onDetection func(Detection), onProgres
 // accepted too: EnCase E01 sets (pass the .E01) decode transparently,
 // and split raw sets (base.001, base.002, ...) concatenate. Either
 // callback may be nil.
+//
+// A root target that cannot be read (or that covers zero bytes of an
+// expected size) is an error, never a quiet success; nested targets
+// inside it stay warn-and-continue.
 func ScanWithOptions(startOffset int64, path string, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
 	if _, err := os.Stat(path); err != nil {
@@ -339,6 +348,7 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 	if err != nil {
 		return err
 	}
+	opts.strictRoot = true
 	return runPipeline(target, opts, onDetection, onProgress)
 }
 
@@ -525,6 +535,12 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 
 	signals := make(chan error, 10)
 
+	// rootDone carries the root target's outcome from scanBlocks: nil
+	// when it was read, the failure otherwise. Buffered so the send
+	// never blocks, including after cancellation; only strictRoot
+	// pipelines (ScanWithOptions) receive from it.
+	rootDone := make(chan error, 1)
+
 	// scanTargets buffers pending nested-archive targets (1M slots ≈
 	// 16 MiB of pointers); past that, publishers block rather than grow
 	// memory. Depth (maxArchiveDepth) plus per-member caps bound what a
@@ -548,7 +564,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	}
 
 	// 1. Scan target files, breaking them into blocks of data to work with
-	go scanBlocks(ctx, scanTargets, emptyBlocks, zipDetectionQueue, onProgress, opts)
+	go scanBlocks(ctx, scanTargets, emptyBlocks, zipDetectionQueue, onProgress, opts, rootDone)
 
 	// 2. Pass blocks to zipfile detection; any files found will be published as new targets
 	go scanZipFiles(ctx, zipDetectionQueue, gzipDetectionQueue, scanTargets, opts.logWriter())
@@ -568,6 +584,15 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	// its last completed mark (stages exit before writing more).
 	select {
 	case signal := <-signals:
+		if signal == io.EOF && opts.strictRoot {
+			// Coverage honesty: a root that failed or covered
+			// nothing is an error, not a quiet success. The
+			// root outcome precedes EOF through the pipeline,
+			// so this receive never blocks.
+			if rootErr := <-rootDone; rootErr != nil {
+				signal = rootErr
+			}
+		}
 		if rec != nil {
 			status, runErr := "complete", error(nil)
 			if signal != io.EOF {
@@ -592,7 +617,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 }
 
 func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *Block, out chan *Block,
-	onProgress func(ProgressInfo), opts Options) {
+	onProgress func(ProgressInfo), opts Options, rootDone chan<- error) {
 	var f TargetReader
 	var currentOffset int64
 	overlap := scanOverlap()
@@ -601,6 +626,11 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 	firstTarget := true
 	var checkpointRoot bool
 	var blocksSinceCheckpoint int
+	// Root-outcome tracking for strictRoot pipelines: rootErr keeps the
+	// first root failure, rootCovered the bytes actually read from the
+	// root, rootExpected the bytes the root claimed (unknown when < 0).
+	var rootErr error
+	var rootCovered, rootExpected int64
 
 	for {
 		var target scanTarget
@@ -613,22 +643,43 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		// Only the root target is journaled; nested archives re-scan on
 		// resume, which is cheap relative to the device that holds them.
 		checkpointRoot = firstTarget
+		isRoot := firstTarget
 		firstTarget = false
+		strict := isRoot && opts.strictRoot
 
 		opts.logf("[scan] Starting new target: %s\n", target.Describe())
 		totalBytes, err := target.Size()
 		if err != nil {
-			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
-			goto nextTarget
+			if !strict {
+				opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+				goto nextTarget
+			}
+			// The size feeds only the progress total and the
+			// coverage check: a strict root with an unreadable
+			// size (empty file, device node) still gets its
+			// Open attempt below, with an unknown total like
+			// nested gzip members. No warning here: Open and
+			// the read loop report real failures themselves,
+			// and an unsized-but-readable root is a success.
+			totalBytes = -1
+		}
+		if strict {
+			rootExpected = totalBytes - target.StartOffset()
 		}
 
 		if f, err = target.Open(); err != nil {
 			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+			if strict {
+				rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+			}
 			goto nextTarget
 		}
 
 		if _, err = f.Seek(target.StartOffset(), 0); err != nil {
 			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+			if strict {
+				rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+			}
 			goto nextTarget
 		}
 
@@ -666,6 +717,9 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 				}
 				if read == 0 && !seekable {
 					opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+					if strict && rootErr == nil {
+						rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+					}
 					emptyBlocks <- block
 					goto nextTarget
 				}
@@ -677,10 +731,16 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 					// Position is indeterminate after failed reads.
 					if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
 						opts.logf("[scan] Unable to scan target: %s\n", serr.Error())
+						if strict && rootErr == nil {
+							rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), serr)
+						}
 						goto nextTarget
 					}
 					continue
 				}
+			}
+			if strict {
+				rootCovered += int64(read)
 			}
 			// A partial read with an error still yields a valid block: the
 			// bytes already returned are real target data. This matters for
@@ -748,6 +808,18 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		}
 
 	nextTarget:
+		if strict {
+			// The root promised bytes but yielded none (vanished
+			// mid-run, fully unreadable): that is a failed scan,
+			// not a clean one. Unknown or already-consumed sizes
+			// (empty files, resume at EOF, -s past the end) stay
+			// successes.
+			if rootErr == nil && rootCovered == 0 && rootExpected > 0 {
+				rootErr = fmt.Errorf("cannot scan %s: covered 0 of %d expected bytes",
+					target.Describe(), rootExpected)
+			}
+			rootDone <- rootErr
+		}
 		if checkpointRoot && opts.CheckpointPath != "" && f != nil {
 			writeScanCheckpoint(opts, target, currentOffset)
 		}

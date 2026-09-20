@@ -35,6 +35,60 @@ jobs:
             go test ./detector/ -run NONE -fuzz "^$f\$" -fuzztime 15s
           done
 
+  password-handoff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      JOHN_VERSION: '1.9.0-jumbo-1'
+      HASHCAT_VERSION: '6.2.6'
+      BTCR_SHA: '1457088'
+      ETH_KEYFILE_VERSION: '0.6.0'
+      SETUPTOOLS_VERSION: '80.9.0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: install hashcat + pocl
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq hashcat pocl-opencl-icd libssl-dev zlib1g-dev patch
+      - name: cache john build
+        uses: actions/cache@v4
+        with:
+          path: /tmp/john-src
+          key: john-${{ env.JOHN_VERSION }}-${{ hashFiles('scripts/john-1.9.0-jumbo-1-gcc13-blake2.patch') }}
+      - name: build john
+        run: |
+          if [ -x "/tmp/john-src/john-${JOHN_VERSION}/run/john" ]; then exit 0; fi
+          mkdir -p /tmp/john-src && cd /tmp/john-src
+          curl -sL -o john.tar.gz "https://www.openwall.com/john/k/john-${JOHN_VERSION}.tar.gz"
+          tar xzf john.tar.gz
+          cd "john-${JOHN_VERSION}"
+          patch -p0 < "$GITHUB_WORKSPACE/scripts/john-1.9.0-jumbo-1-gcc13-blake2.patch"
+          cd src && ./configure && make -s -j"$(nproc)"
+      - name: cache pocl kernels
+        uses: actions/cache@v4
+        with:
+          path: /tmp/pocl-cache
+          key: pocl-hashcat-${{ env.HASHCAT_VERSION }}
+      - name: clone btcrecover
+        run: git clone -q https://github.com/3rdIteration/btcrecover /tmp/btcrecover && git -C /tmp/btcrecover checkout -q "$BTCR_SHA"
+      - name: install btcrecover deps
+        run: pip install -q "wallycore>=1.0.0" "protobuf~=5.29.6" "pycryptodome~=3.23.0" "eth-keyfile==$ETH_KEYFILE_VERSION" "setuptools==$SETUPTOOLS_VERSION"
+      - name: assert tool pins
+        run: |
+          hashcat --version | grep -q "v$HASHCAT_VERSION"
+          "/tmp/john-src/john-$JOHN_VERSION/run/john" 2>&1 | grep -q "John the Ripper $JOHN_VERSION"
+          test "$(git -C /tmp/btcrecover rev-parse --short HEAD)" = "$BTCR_SHA"
+          python3 -c "import importlib.metadata as m; assert m.version('eth-keyfile') == '$ETH_KEYFILE_VERSION', m.version('eth-keyfile')"
+          python3 -c "import importlib.metadata as m; assert m.version('setuptools') == '$SETUPTOOLS_VERSION', m.version('setuptools')"
+      - name: run password handoff
+        run: |
+          go build -o /tmp/findbtc-handoff .
+          FINDBTC=/tmp/findbtc-handoff JOHN="/tmp/john-src/john-$JOHN_VERSION/run/john" HASHCAT=hashcat BTCR_DIR=/tmp/btcrecover PYTHON=python3 POCL_CACHE_DIR=/tmp/pocl-cache scripts/password-handoff.sh "$GITHUB_WORKSPACE" /tmp/handoff-work
+
   gates:
     runs-on: ubuntu-latest
     steps:

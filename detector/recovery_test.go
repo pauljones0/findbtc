@@ -116,7 +116,7 @@ func runScanBlocks(t *testing.T, target scanTarget, onBadSector BadSectorFunc) [
 		empty <- &Block{data: make([]byte, blockSize+scanOverlap())}
 	}
 	targets <- target
-	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{OnBadSector: onBadSector})
+	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{OnBadSector: onBadSector}, make(chan error, 1))
 
 	var blocks []*Block
 	timeout := time.After(15 * time.Second)
@@ -251,7 +251,7 @@ func TestCheckpointWrittenDuringScan(t *testing.T) {
 		empty <- &Block{data: make([]byte, blockSize+scanOverlap())}
 	}
 	targets <- target
-	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{CheckpointPath: ckpt})
+	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{CheckpointPath: ckpt}, make(chan error, 1))
 
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()

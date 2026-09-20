@@ -45,6 +45,66 @@ func findKeystores(data []byte, baseAbs int64) []keystoreMatch {
 	return matches
 }
 
+// presaleAnchor marks Ethereum presale wallets (the encseed shape), which
+// carry no crypto object and therefore never match findKeystores. They
+// are detected as out of scope: no supported cracker input exists.
+var presaleAnchor = []byte(`"encseed"`)
+
+// findPresales returns a skip per presale-shaped object in data: valid
+// JSON holding encseed plus a second presale field, so prose mentioning
+// encseed does not report. baseAbs is the absolute offset of data[0].
+func findPresales(data []byte, baseAbs int64) []HashSkip {
+	var skips []HashSkip
+	seen := map[int64]bool{}
+	for i := 0; i+len(presaleAnchor) <= len(data); {
+		j := bytes.Index(data[i:], presaleAnchor)
+		if j == -1 {
+			break
+		}
+		anchor := i + j
+		back := anchor - keystoreMaxSpan
+		if back < 0 {
+			back = 0
+		}
+		// Candidate braces nearest-first like keystoreBounds: the
+		// nearest '{' may open a nested object, so try outward.
+		tried := 0
+		for s := anchor - 1; s >= back && tried < 32; s-- {
+			if data[s] != '{' {
+				continue
+			}
+			tried++
+			end := braceEnd(data, s)
+			if end <= 0 || end-s > keystoreMaxSpan {
+				continue
+			}
+			obj := data[s:end]
+			if !bytes.Contains(obj, presaleAnchor) {
+				continue
+			}
+			if !bytes.Contains(obj, []byte(`"bkp"`)) && !bytes.Contains(obj, []byte(`"ethaddr"`)) {
+				continue
+			}
+			var v map[string]json.RawMessage
+			if json.Unmarshal(obj, &v) != nil {
+				continue
+			}
+			if _, ok := v["encseed"]; !ok || seen[int64(s)] {
+				continue
+			}
+			seen[int64(s)] = true
+			skips = append(skips, HashSkip{
+				Offset: baseAbs + int64(s),
+				Kind:   "ethereum-presale",
+				Reason: "presale wallets are out of scope (no supported cracker export)",
+			})
+			break
+		}
+		i = anchor + 1
+	}
+	return skips
+}
+
 // keystoreBounds locates the JSON object enclosing the anchor: candidate
 // braces are tried nearest-first and the first structurally valid object wins.
 func keystoreBounds(data []byte, anchor int) (int, int, bool) {

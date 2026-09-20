@@ -19,8 +19,9 @@ import (
 var version = "dev"
 
 // Exit codes are a consumer contract (see README): 0 the run
-// completed (hits or not), 1 runtime error, 2 bad flags/usage, and
-// exitHitsFound only with -fail-on-hit when anything matched.
+// completed and covered its target (hits or not), 1 runtime error
+// or zero coverage, 2 bad flags/usage, and exitHitsFound only with
+// -fail-on-hit when anything matched.
 const exitHitsFound = 3
 
 // gateOnHits trips the CI gate: with failOnHit set and n > 0 it says
@@ -46,11 +47,17 @@ func main() {
 	checkpointPath := flag.String("checkpoint", "", "Journal scan progress to FILE every 1MB for crash recovery")
 	resume := flag.Bool("resume", false, "Resume from -checkpoint instead of scanning from the start")
 	reportPath := flag.String("report", "", "Summarize a -json hits file (or - for stdin) instead of scanning")
+	complete := flag.Bool("complete", false, "With -report: enumerate checksum-valid completions for partial-seed (near-miss) hits (needs --reveal; local terminal only)")
+	completeOut := flag.String("complete-out", "", "With -report -complete: write candidate account keys (watch-only) to PATH for -watch (only with -complete)")
+	completeMax := flag.Int("complete-max", detector.CompleteDefaultMax, "With -report -complete: candidates shown per hit, most-likely first (only with -complete)")
 	dfxmlPath := flag.String("dfxml", "", "Convert a -json hits file (or - for stdin) to DFXML on stdout instead of scanning")
 	verifyLogPath := flag.String("verify-case-log", "", "Re-hash the sources behind each record in case-log FILE and report match/mismatch instead of scanning")
 	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)")
 	baselinePath := flag.String("baseline", "", "Suppress -walk findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)")
 	hashesPath := flag.String("hashes", "", "Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning")
+	tokenlistPath := flag.String("tokenlist", "", "Build a BTCRecover tokenlist from the words in FILE, a carve, or hits.jsonl with carves (or - for stdin) instead of scanning")
+	tokenlistOut := flag.String("tokenlist-out", "", "Write the tokenlist to PATH instead of stdout (only with -tokenlist)")
+	tokenlistMax := flag.Int("tokenlist-max", detector.TokenlistDefaultMax, "Emit at most N token lines, first-seen first (only with -tokenlist)")
 	salvagePath := flag.String("salvage", "", "Analyze FILE for salvageable database pages instead of scanning")
 	salvageOut := flag.String("salvage-out", "", "Write the salvaged database image to PATH (only with -salvage)")
 	watchPath := flag.String("watch", "", "Derive watch-only addresses from extended public keys in FILE (a carve, a key file, or hits.jsonl with carves) instead of scanning")
@@ -78,9 +85,17 @@ func main() {
 	// An explicit -fs-offset pins the volume; otherwise -fs and
 	// -unallocated-only follow the partition table (Goal 12).
 	fsOffsetSet := false
+	completeMaxSet := false
+	tokenlistMaxSet := false
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "fs-offset" {
 			fsOffsetSet = true
+		}
+		if f.Name == "complete-max" {
+			completeMaxSet = true
+		}
+		if f.Name == "tokenlist-max" {
+			tokenlistMaxSet = true
 		}
 	})
 	if *showVersion {
@@ -90,8 +105,30 @@ func main() {
 	if *reveal {
 		fmt.Fprintln(os.Stderr, "WARNING: --reveal prints seed words to stdout. Owner recovery only: keep this output secret, never share or paste it anywhere.")
 	}
+	if *complete || *completeOut != "" || completeMaxSet {
+		if *reportPath == "" {
+			fmt.Fprintln(os.Stderr, "[complete] Exiting due to error: -complete is a -report follow-up: findbtc -report hits.jsonl -complete --reveal")
+			os.Exit(2)
+		}
+		if !*complete {
+			fmt.Fprintln(os.Stderr, "[complete] Exiting due to error: -complete-out and -complete-max need -complete")
+			os.Exit(2)
+		}
+		if *jsonOut {
+			fmt.Fprintln(os.Stderr, "[complete] Exiting due to error: -complete prints candidate seeds for humans on this terminal; drop -json (machine output gets saved and logged)")
+			os.Exit(2)
+		}
+		if !*reveal {
+			fmt.Fprintln(os.Stderr, "[complete] Exiting due to error: -complete prints candidate seed phrases — re-run with --reveal on your own machine, local terminal only, and never share the output")
+			os.Exit(2)
+		}
+		if *completeMax < 1 || *completeMax > detector.CompleteHardMax {
+			fmt.Fprintf(os.Stderr, "[complete] Exiting due to error: -complete-max must be 1-%d\n", detector.CompleteHardMax)
+			os.Exit(2)
+		}
+	}
 	if *reportPath != "" {
-		runReport(*reportPath, *jsonOut, *failOnHit)
+		runReport(*reportPath, *jsonOut, *failOnHit, *complete, *completeOut, *completeMax)
 		return
 	}
 	if *dfxmlPath != "" {
@@ -107,6 +144,18 @@ func main() {
 			fmt.Fprintf(os.Stderr, "[verify] Exiting due to error: %s\n", err.Error())
 			os.Exit(1)
 		}
+		return
+	}
+	if *tokenlistPath != "" || *tokenlistOut != "" || tokenlistMaxSet {
+		if *tokenlistPath == "" {
+			fmt.Fprintln(os.Stderr, "[tokenlist] Exiting due to error: -tokenlist-out and -tokenlist-max need -tokenlist FILE")
+			os.Exit(2)
+		}
+		if *tokenlistMax < 1 || *tokenlistMax > detector.TokenlistHardMax {
+			fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: -tokenlist-max must be 1-%d\n", detector.TokenlistHardMax)
+			os.Exit(2)
+		}
+		runTokenlist(*tokenlistPath, *tokenlistOut, *tokenlistMax)
 		return
 	}
 	if *hashesPath != "" {
@@ -148,7 +197,7 @@ func main() {
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit]\n   or: %s -hashes FILE [-json]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -363,6 +412,18 @@ func runWalk(root string, follow bool, maxdepth int, jsonOut bool, carveDir stri
 		fmt.Fprintf(os.Stderr, "[walk] ... and %d more failures (capped in this summary; -case-log holds the per-file records).\n",
 			stats.FailedTotal-int64(len(stats.Failed)))
 	}
+	if stats.FailedTotal > 0 {
+		fmt.Fprintf(os.Stderr, "[walk] WARNING: %d file(s) could not be scanned; coverage is incomplete.\n", stats.FailedTotal)
+	}
+	if stats.Files == 0 {
+		// Zero coverage: nothing was scanned, so 0 would certify a
+		// clean tree the sweep never saw. Skips are policy (counted
+		// above); failures carry the reasons.
+		skipped := stats.SkippedSymlinks + stats.SkippedSpecial + stats.SkippedDepth + stats.SkippedOwn
+		fmt.Fprintf(os.Stderr, "[walk] Exiting due to error: scanned 0 files, nothing was covered (%d failures, %d skipped)\n",
+			stats.FailedTotal, skipped)
+		os.Exit(1)
+	}
 	fmt.Fprintln(os.Stderr, "[COMPLETE]")
 	gateOnHits("walk", int(stats.Detections), failOnHit)
 }
@@ -391,7 +452,7 @@ func runAdvise(path string) {
 	}
 }
 
-func runReport(path string, jsonOut bool, failOnHit bool) {
+func runReport(path string, jsonOut bool, failOnHit, complete bool, completeOut string, completeMax int) {
 	f := os.Stdin
 	if path != "-" {
 		var err error
@@ -418,7 +479,111 @@ func runReport(path string, jsonOut bool, failOnHit bool) {
 	} else {
 		fmt.Print(rep.Text())
 	}
+	if complete {
+		runSeedComplete(dets, path, completeOut, completeMax)
+	}
 	gateOnHits("report", rep.Unique, failOnHit)
+}
+
+// runSeedComplete implements the -report -complete follow-up: enumerate
+// checksum-valid completions for partial-seed (near-miss) hits carrying
+// --reveal words, most-likely first, with a "did you mean" correction
+// and an optional watch-only handoff file. Always exits 0: refusals and
+// empty inputs are completed triage answers, not failures.
+func runSeedComplete(dets []detector.Detection, path, outPath string, max int) {
+	fmt.Fprintln(os.Stderr, detector.SeedCompleteWarning())
+	var near []detector.Detection
+	unordered := 0
+	for _, d := range dets {
+		switch {
+		case strings.Contains(d.Needle, "near-miss"):
+			near = append(near, d)
+		case d.Needle == "bip39-unordered":
+			unordered++
+		}
+	}
+	if len(near) == 0 {
+		fmt.Printf("Seed completion: no partial-seed (near-miss) hits to complete in %s.\n", path)
+		fmt.Println("Two usual reasons:")
+		fmt.Println("  1. The hits were scanned without --reveal, so no words are attached. Rescan the carve on your own machine: findbtc --reveal -json CARVE > hits2.jsonl")
+		fmt.Println("  2. Three or more words are missing or garbled: billions of tries, beyond offline enumeration. Take the carve to BTCRecover with GPU tokenlists (see docs/WHAT_NEXT.md).")
+		if unordered > 0 {
+			fmt.Printf("  (%d unordered word-pile hits are not completable either: reordering is BTCRecover's job, not enumeration.)\n", unordered)
+		}
+		return
+	}
+	var out *os.File
+	if outPath != "" {
+		var err error
+		out, err = os.Create(outPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[complete] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		defer out.Close()
+		fmt.Fprintln(out, "# findbtc -complete handoff: watch-only account keys (3 per candidate).")
+		fmt.Fprintln(out, "# Candidate numbers match the terminal listing above; phrases never land in this file.")
+	}
+	wordless := 0
+	completed := 0
+	totalKeys := 0
+	fmt.Printf("Seed completion (offline; %d partial-seed hits in %s):\n", len(near), path)
+	for i, d := range near {
+		tag := fmt.Sprintf("[hit %d] %s @%d (%s)", i+1, d.Needle, d.Offset, d.Target)
+		if len(d.Words) == 0 {
+			fmt.Printf("%s — no words attached (scanned without --reveal); rescan the carve with --reveal to complete it.\n", tag)
+			wordless++
+			continue
+		}
+		res, err := detector.CompleteSeed(d.Words, max)
+		if err != nil {
+			fmt.Printf("%s REFUSED: %s\n", tag, err.Error())
+			continue
+		}
+		completed++
+		fmt.Printf("%s gaps=%v\n", tag, res.Partial.Gaps)
+		for _, c := range res.Corrections {
+			fmt.Printf("  did you mean %q at position %d? (gap was %q; checksum-valid)\n",
+				c.Suggest[0], c.Position, c.Token)
+			for _, alt := range c.Suggest[1:] {
+				fmt.Printf("  ... or %q at position %d? (checksum-valid)\n", alt, c.Position)
+			}
+		}
+		showing := "showing all"
+		if res.Truncated {
+			showing = fmt.Sprintf("showing %d most-likely first", len(res.Shown))
+		}
+		fmt.Printf("  %d checksum-valid completions (%s):\n", res.Total, showing)
+		for k, s := range res.Shown {
+			fmt.Printf("  candidate %d: %s\n", k+1, strings.Join(s.Words, " "))
+			if out != nil {
+				accts, err := detector.SeedToAccounts(s.Words)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "[complete] Exiting due to error: %s\n", err.Error())
+					os.Exit(1)
+				}
+				fmt.Fprintf(out, "# candidate %d (hit %d %s @%d)\n", k+1, i+1, d.Needle, d.Offset)
+				fmt.Fprintln(out, accts.XPub44)
+				fmt.Fprintln(out, accts.YPub49)
+				fmt.Fprintln(out, accts.ZPub84)
+				totalKeys += 3
+			}
+		}
+		if res.Truncated {
+			fmt.Printf("  ... %d more not shown. Narrow the gaps (fix a typo) or raise -complete-max (max %d).\n",
+				res.Total-len(res.Shown), detector.CompleteHardMax)
+		}
+	}
+	if wordless > 0 {
+		fmt.Printf("%d of %d near-miss hits carry no words: rescan with --reveal on your own machine, then re-run -complete.\n", wordless, len(near))
+	}
+	if out != nil {
+		fmt.Printf("Wrote %d watch-only account keys to %s (3 per candidate: m/44'/0'/0' xpub, m/49'/0'/0' ypub, m/84'/0'/0' zpub).\n", totalKeys, outPath)
+		fmt.Printf("Next: findbtc -watch %s -watch-out addrs.csv — then check those addresses from your own node (see docs/WATCH_ONLY.md). Match the funded candidate number back to the phrase above and restore it in wallet software, offline.\n", outPath)
+	} else if completed > 0 {
+		fmt.Println("Next: re-run with -complete-out keys.txt to derive watch-only account keys for these candidates, then findbtc -watch keys.txt -watch-out addrs.csv.")
+	}
+	fmt.Println("When to stop: a candidate whose addresses are all empty on every path is the wrong phrase — delete the output. If no candidate funds, the missing words were never findable this way; see docs/WHAT_NEXT.md.")
 }
 
 // runDFXML implements DFXML-export mode: convert saved -json hits to a
@@ -467,9 +632,15 @@ func runHashes(path string, jsonOut bool) {
 		fmt.Fprintf(os.Stderr, "[hashes] Exiting due to error: input exceeds %d bytes; carve the hit region first\n", detector.HashScanMaxBytes)
 		os.Exit(1)
 	}
-	hashes := detector.ExtractHashes(buf, 0)
+	hashes, skips := detector.ExtractHashesWithSkips(buf, 0)
 	if hashes == nil {
 		hashes = []detector.CrackHash{}
+	}
+	// Skips ride stderr in both modes: stdout stays a pure hash list
+	// (or JSON array) while the user still learns WHY a wallet-shaped
+	// record produced nothing.
+	for _, s := range skips {
+		fmt.Fprintf(os.Stderr, "[hashes] skipped %s @%d: %s\n", s.Kind, s.Offset, s.Reason)
 	}
 	if jsonOut {
 		raw, err := json.MarshalIndent(hashes, "", "  ")
@@ -497,6 +668,152 @@ func runHashes(path string, jsonOut bool) {
 		fmt.Printf("  %s\n", cmd)
 	}
 	fmt.Println("Full runbook (hashcat, John, BTCRecover): docs/PASSWORD_RECOVERY.md")
+}
+
+// runTokenlist implements tokenlist mode: turn hit-context bytes (a carve,
+// a notes file, or hits.jsonl whose carves are then read) into a
+// BTCRecover tokenlist — one line per distinct nearby word with case
+// mutations. Always exits 0: empty input is a completed answer, like
+// "No crack material found".
+func runTokenlist(path, outPath string, max int) {
+	f := os.Stdin
+	if path != "-" {
+		var err error
+		f, err = os.Open(path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		defer f.Close()
+	}
+	buf, err := io.ReadAll(io.LimitReader(f, detector.TokenlistMaxBytes+1))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	if len(buf) > detector.TokenlistMaxBytes {
+		fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: input exceeds %d bytes\n", detector.TokenlistMaxBytes)
+		os.Exit(1)
+	}
+	data := tokenlistInputBytes(buf, path)
+	text, stats := detector.BuildTokenlist(data, max)
+	if text == "" {
+		fmt.Printf("No token words found in %s (need 3+ letter/digit runs).\n", path)
+		return
+	}
+	if outPath != "" {
+		if err := os.WriteFile(outPath, []byte(text), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+	}
+	if stats.Truncated {
+		fmt.Fprintf(os.Stderr, "[tokenlist] warning: %d words found, showing first %d (raise -tokenlist-max)\n",
+			stats.Words, stats.Lines)
+	}
+	if outPath == "" {
+		fmt.Print(text)
+		return
+	}
+	fmt.Printf("Wrote %d token lines (%d base words) to %s\n", stats.Lines, stats.Words, outPath)
+	// The example filename is split so this file stays needle-free:
+	// TestWalkSelfScanRepo scans the repo and the joined name is a
+	// filename needle.
+	fmt.Println("Next: trim to the words you recognize, then: python3 btcrecover.py --wallet "+"wallet"+".dat --tokenlist", outPath, "--max-tokens 3")
+	fmt.Println("Full runbook (tokenlists, wildcards, typos): docs/PASSWORD_RECOVERY.md")
+}
+
+// tokenlistInputBytes resolves -tokenlist input: hits.jsonl with carve
+// paths reads through to the carve bytes (like -watch); anything else is
+// used verbatim.
+func tokenlistInputBytes(buf []byte, path string) []byte {
+	dets, err := detector.ReadDetections(bytes.NewReader(buf))
+	if err != nil || len(dets) == 0 || !hitsShaped(dets) {
+		return buf
+	}
+	var data []byte
+	carves := 0
+	readOK := 0
+	capped := false
+	for _, d := range dets {
+		if d.CarvePath == "" {
+			continue
+		}
+		carves++
+		// Carve bytes bypass the initial input cap, so each carve
+		// is read against the remaining budget — never whole:
+		// carves are consumed in hit order up to
+		// TokenlistMaxBytes, the carve that crosses the line is
+		// truncated to what remains, and further carves are not
+		// opened at all. At most one byte over budget is ever
+		// allocated (the overflow probe).
+		room := detector.TokenlistMaxBytes - len(data) - 1 // room for the '\n' separator
+		if room <= 0 {
+			capped = true
+			break
+		}
+		carve, overflow, err := readCarveCapped(d.CarvePath, room)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[tokenlist] warning: cannot read carve %s: %s\n", d.CarvePath, err.Error())
+			continue
+		}
+		readOK++
+		data = append(data, carve...)
+		data = append(data, '\n')
+		if overflow {
+			capped = true
+			break
+		}
+	}
+	if carves == 0 {
+		fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: %s has hits but no carve paths — rescan with -extract-dir, or run -tokenlist on a file holding the context\n", path)
+		os.Exit(1)
+	}
+	// Zero bytes scanned is blindness, not cleanliness: like -walk's
+	// all-failed rule, carves that all fail to read fail the run
+	// instead of falling through to the empty-data message.
+	if readOK == 0 {
+		fmt.Fprintf(os.Stderr, "[tokenlist] Exiting due to error: %s names carve paths but none could be read\n", path)
+		os.Exit(1)
+	}
+	if capped {
+		fmt.Fprintf(os.Stderr, "[tokenlist] warning: carve bytes exceed %d; using the first %d\n", detector.TokenlistMaxBytes, len(data))
+	}
+	return data
+}
+
+// hitsShaped tells real hits.jsonl from JSON that merely parses:
+// Detection has no required fields, so a foreign object like {"a": 1}
+// would otherwise be misread as one carveless hit and refused. Real
+// hits always carry description/needle/target; input with all three
+// empty on every record is used verbatim.
+func hitsShaped(dets []detector.Detection) bool {
+	for _, d := range dets {
+		if d.Description != "" || d.Needle != "" || d.Target != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// readCarveCapped reads at most max bytes from path (plus one probe
+// byte to detect overflow); it reports the bytes kept, whether the
+// file held more, and any read error. A single oversized carve can
+// never allocate past max+1.
+func readCarveCapped(path string, max int) (kept []byte, overflow bool, err error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	buf, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(buf) > max {
+		return buf[:max], true, nil
+	}
+	return buf, false, nil
 }
 
 // hashCommands returns one follow-up command per hash kind present.
