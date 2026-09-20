@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -271,7 +272,11 @@ type Options struct {
 	// checkpoint warnings). Nil writes to os.Stderr, exactly as
 	// before; set it to route logs anywhere else, or to io.Discard
 	// for quiet embedding. Detection output never goes here — it
-	// flows through the onDetection callback.
+	// flows through the onDetection callback. The library
+	// serializes its own writes through one package-level mutex,
+	// so a plain non-goroutine-safe sink (bytes.Buffer) is safe;
+	// the caller must still not write to (or read) the sink
+	// concurrently from outside the scan.
 	Log io.Writer
 	// Patch treats the input as a patch series (git log -p) and
 	// attributes each root-target hit to commit + repo path (+
@@ -316,8 +321,17 @@ func (o Options) logWriter() io.Writer {
 	return os.Stderr
 }
 
+// logMu serializes every logf/logLinef write. Pipeline stages log
+// concurrently (gate warn-once, block processing, drains), and
+// Options is copied by value, so the mutex lives here at package
+// level — never in Options — as the single serialization point
+// for all diagnostics sinks.
+var logMu sync.Mutex
+
 // logf writes one diagnostics line to the configured sink.
 func (o Options) logf(format string, args ...any) {
+	logMu.Lock()
+	defer logMu.Unlock()
 	fmt.Fprintf(o.logWriter(), format, args...)
 }
 
@@ -327,6 +341,8 @@ func logLinef(w io.Writer, format string, args ...any) {
 	if w == nil {
 		w = os.Stderr
 	}
+	logMu.Lock()
+	defer logMu.Unlock()
 	fmt.Fprintf(w, format, args...)
 }
 
@@ -616,16 +632,15 @@ func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (idx i
 // are written only after a drain proves every byte at or before
 // them delivered; the root-end point travels to runPipeline,
 // which writes it on clean EOF. digest carries the cumulative
-// covered-bytes SHA-256 at the frontier: mid-run points pin the
-// prefix a resume must re-verify before continuing, and the
-// completion point (complete) pins the whole target for skips.
+// covered-bytes SHA-256 at the frontier, set only on the
+// completion point to pin the whole target for skips; mid-run
+// points leave it empty and resume re-covers from the offset.
 type pendingFrontier struct {
-	desc     string
-	offset   int64
-	ranges   []FSExtent
-	index    int
-	digest   string
-	complete bool
+	desc   string
+	offset int64
+	ranges []FSExtent
+	index  int
+	digest string
 }
 
 // batchDigest streams the root bytes of one batch scan for the
@@ -968,7 +983,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 				// skip-free proven point so a retry
 				// re-covers the omitted bytes instead of
 				// skipping them forever.
-				signal = fmt.Errorf("incomplete coverage: skipped %d nested archives past the %d publication cap; retry to recover", n, maxOutstandingPubs)
+				signal = fmt.Errorf("incomplete coverage: skipped %d nested targets past the %d publication cap; retry to recover", n, maxOutstandingPubs)
 			}
 		}
 		if rec != nil {

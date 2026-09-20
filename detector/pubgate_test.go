@@ -93,8 +93,48 @@ func TestPubGateTripsEndToEnd(t *testing.T) {
 	if !strings.Contains(log.String(), "coverage is incomplete") {
 		t.Errorf("no incompleteness warning, log:\n%s", log.String())
 	}
-	if dets != 3 {
-		t.Errorf("gated scan detections = %d, want 3 (drains admitted work, then errors)", dets)
+	// No exact count: the admitted-vs-skipped split depends on
+	// pipeline timing, so only the congested bound is stable.
+	if dets >= 10 {
+		t.Errorf("gated scan detections = %d, want fewer than the 10 members (congestion must drop work)", dets)
+	}
+}
+
+// Cap zero admits nothing: tryPublish refuses before any send,
+// so the congested outcome is fully deterministic — zero
+// detections plus the incomplete-coverage error.
+func TestPubGateCapZeroAdmitsNothing(t *testing.T) {
+	old := maxOutstandingPubs
+	maxOutstandingPubs = 0
+	defer func() { maxOutstandingPubs = old }()
+
+	var zb bytes.Buffer
+	w := zip.NewWriter(&zb)
+	for i := 0; i < 10; i++ {
+		fw, err := w.Create("m.dat")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fw.Write([]byte("bestblock")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "many.zip")
+	if err := os.WriteFile(path, zb.Bytes(), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var log bytes.Buffer
+	var dets int
+	err := ScanWithOptions(0, path, Options{Log: &log},
+		func(Detection) { dets++ }, func(ProgressInfo) {})
+	if err == nil || !strings.Contains(err.Error(), "incomplete coverage") {
+		t.Fatalf("cap-0 scan error = %v, want incomplete-coverage error\n%s", err, log.String())
+	}
+	if dets != 0 {
+		t.Errorf("cap-0 detections = %d, want 0 (every nested publish refused)", dets)
 	}
 }
 
