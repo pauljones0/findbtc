@@ -172,6 +172,64 @@ func TestAdviseCommandPastesPowerShell(t *testing.T) {
 	}
 }
 
+// Windows root semantics where supported (Goal 41): advising the
+// drive root routes a walk without running one, and a small known
+// system file scans identically under its plain and extended-length
+// (\\?\) forms with honest completion. Only completion and coverage
+// assert — the file's contents are the machine's, not a fixture.
+// UNC (\\server\share) is explicitly out of scope: no offline SMB
+// fixture exists, so no silent skip pretends to cover it.
+func TestWindowsRootAndExtendedPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("windows root semantics; windows only")
+	}
+	stdout, _, exit := runTestBinary(t, "-advise", `C:\`)
+	if exit != 0 {
+		t.Fatalf("-advise C:\\ exit %d", exit)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(firstLine(stdout)), "Target: ") {
+		t.Fatalf("-advise C:\\ printed no target line:\n%s", stdout)
+	}
+	line := advisedCommand(t, `C:\`)
+	if !strings.HasPrefix(line, `"`+testBinary+`" -walk `) {
+		t.Fatalf("drive-root advice %q, want a -walk route (never executed here)", line)
+	}
+	hosts := filepath.Join(os.Getenv("SystemRoot"), "System32", "drivers", "etc", "hosts")
+	if hosts == "" || os.Getenv("SystemRoot") == "" {
+		t.Skip("no SystemRoot; cannot stage the known system file")
+	}
+	if _, err := os.Stat(hosts); err != nil {
+		t.Skipf("hosts file unreadable (%v); nothing to prove root semantics on", err)
+	}
+	for _, target := range []string{hosts, `\\?\` + hosts} {
+		log := filepath.Join(t.TempDir(), "case.jsonl")
+		stdout, stderr, exit := runTestBinary(t, "-json", "-case-log", log, target)
+		if exit != 0 {
+			t.Errorf("scan of %q exit %d, stderr:\n%s", target, exit, stderr)
+			continue
+		}
+		if !strings.Contains(stderr, "[COMPLETE]") {
+			t.Errorf("scan of %q never completed, stderr:\n%s", target, stderr)
+		}
+		if strings.Contains(stderr, "WARNING") {
+			t.Errorf("scan of %q warned, stderr:\n%s", target, stderr)
+		}
+		for i, line := range strings.Split(strings.TrimRight(stdout, "\n"), "\n") {
+			if line == "" {
+				continue
+			}
+			var hit map[string]any
+			if err := json.Unmarshal([]byte(line), &hit); err != nil {
+				t.Errorf("scan of %q line %d not JSON: %v", target, i, err)
+			}
+		}
+		vout, _, vexit := runTestBinary(t, "-verify-case-log", log)
+		if vexit != 0 {
+			t.Errorf("case-log for %q failed verification:\n%s", target, vout)
+		}
+	}
+}
+
 // runTestBinaryDir runs the test binary with its working directory
 // set, for relative-path cases like dash-prefixed filenames.
 func runTestBinaryDir(t *testing.T, dir string, args ...string) (stdout, stderr string, exit int) {
@@ -1125,6 +1183,81 @@ func TestPasswordRecoveryDocCommands(t *testing.T) {
 		}
 		if !strings.Contains(string(doc), want) {
 			t.Errorf("doc stamp lost %q (pin %s)", want, key)
+		}
+	}
+}
+
+// The owner rehearsal (Goal 41) runs one README block verbatim:
+// the markers must fence exactly one ```sh block of findbtc-only
+// commands, and the harness plus CI must keep executing it.
+func TestOwnerRehearsalWiring(t *testing.T) {
+	raw, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(raw)
+	start, end := "<!-- owner-rehearsal:start -->", "<!-- owner-rehearsal:end -->"
+	if strings.Count(doc, start) != 1 || strings.Count(doc, end) != 1 {
+		t.Fatal("README must fence exactly one owner-rehearsal block")
+	}
+	inner := doc[strings.Index(doc, start):strings.Index(doc, end)]
+	var cmds []string
+	inBlock := false
+	fences := 0
+	for _, line := range strings.Split(inner, "\n") {
+		switch {
+		case line == "```sh":
+			if inBlock {
+				t.Fatal("nested ```sh fence in rehearsal block")
+			}
+			inBlock = true
+			fences++
+		case line == "```":
+			inBlock = false
+		case inBlock:
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			cmds = append(cmds, line)
+		}
+	}
+	if inBlock {
+		t.Fatal("unclosed ```sh fence in rehearsal block")
+	}
+	if fences != 1 {
+		t.Fatalf("%d ```sh fences in rehearsal block, want 1", fences)
+	}
+	if len(cmds) < 5 {
+		t.Fatalf("only %d rehearsal commands; the owner path must stay executable", len(cmds))
+	}
+	for _, c := range cmds {
+		lead := strings.SplitN(c, " ", 2)[0]
+		if lead != "findbtc" {
+			t.Errorf("rehearsal command has non-findbtc lead %q: %s", lead, c)
+		}
+		if strings.HasSuffix(c, "\\") {
+			t.Errorf("rehearsal command uses continuations (harness runs one line at a time): %s", c)
+		}
+		if strings.HasPrefix(c, "$") {
+			t.Errorf("rehearsal sh block leaks output, not a command: %s", c)
+		}
+	}
+	harness, err := os.ReadFile("scripts/owner-rehearsal.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{start, end, "^```sh$"} {
+		if !strings.Contains(string(harness), want) {
+			t.Errorf("harness lost %q", want)
+		}
+	}
+	ci, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"owner-rehearsal", "scripts/owner-rehearsal.sh"} {
+		if !strings.Contains(string(ci), want) {
+			t.Errorf("ci.yml lost %q", want)
 		}
 	}
 }

@@ -137,6 +137,11 @@ func caseKind(seed scanTarget) string {
 
 // finish builds the record. status is "complete", "error", or
 // "canceled" (caller-cancelled scans record partial hashes honestly).
+// Digests are a hash claim, so a non-complete run that hashed zero
+// bytes carries none — finalizing the empty-input digests would
+// fake coverage the verifier must then mismatch. A complete empty
+// target keeps them: that claim ("zero bytes, empty digest") is
+// true, and the verifier re-checks it by hash.
 func (r *caseRecorder) finish(status string, runErr error) CaseLog {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -156,19 +161,21 @@ func (r *caseRecorder) finish(status string, runErr error) CaseLog {
 		},
 		Flags: r.flags,
 		Hash: CaseHash{
-			SHA256:      hex.EncodeToString(r.sha.Sum(nil)),
-			MD5:         hex.EncodeToString(r.md5h.Sum(nil)),
 			BytesHashed: r.bytes,
 		},
 		Skipped:    r.skipped,
 		Detections: atomic.LoadInt64(&r.detections),
+	}
+	if status == "complete" || r.bytes > 0 {
+		log.Hash.SHA256 = hex.EncodeToString(r.sha.Sum(nil))
+		log.Hash.MD5 = hex.EncodeToString(r.md5h.Sum(nil))
 	}
 	if runErr != nil {
 		log.Error = runErr.Error()
 	}
 	if et, ok := r.seed.(*ewfScanTarget); ok && et.layout.hasMD5 {
 		ce := &CaseEWF{StoredMD5: hex.EncodeToString(et.layout.md5[:])}
-		if r.seed.StartOffset() == 0 && len(r.skipped) == 0 {
+		if r.seed.StartOffset() == 0 && len(r.skipped) == 0 && log.Hash.MD5 != "" {
 			match := log.Hash.MD5 == ce.StoredMD5
 			ce.MD5Match = &match
 		}

@@ -113,6 +113,21 @@ releases, and `go.mod` floors the language version at 1.24.
     # Flags precede targets (parsing stops at the first positional);
     # use -- before a target whose name starts with -.
 
+A cold rehearsal of the whole owner path on synthetic disposable
+media (`scripts/owner-rehearsal.sh` stages `media/` and runs this
+block verbatim, then asserts coverage, case-log verification, and
+that no secret bytes leak into default output):
+
+<!-- owner-rehearsal:start -->
+```sh
+findbtc -advise media/owner.img
+findbtc -json -case-log case.jsonl -extract-dir ./carve media/owner.img media/decoy.bin > hits.jsonl
+findbtc -report hits.jsonl
+findbtc -hashes media/eth-pbkdf2.json
+findbtc -verify-case-log case.jsonl
+```
+<!-- owner-rehearsal:end -->
+
 Not sure which mode fits your target? Ask first — it only inspects,
 never scans:
 

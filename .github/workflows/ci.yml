@@ -97,6 +97,22 @@ jobs:
           go build -o /tmp/findbtc-handoff .
           FINDBTC=/tmp/findbtc-handoff JOHN="/tmp/john-src/john-$JOHN_VERSION/run/john" HASHCAT=hashcat BTCR_DIR=/tmp/btcrecover PYTHON=python3 POCL_CACHE_DIR=/tmp/pocl-cache scripts/password-handoff.sh "$GITHUB_WORKSPACE" /tmp/handoff-work
 
+  owner-rehearsal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: run owner rehearsal
+        run: |
+          go build -o /tmp/findbtc-rehearsal .
+          FINDBTC=/tmp/findbtc-rehearsal PYTHON=python3 scripts/owner-rehearsal.sh "$GITHUB_WORKSPACE" /tmp/rehearsal-work
+
   gates:
     runs-on: ubuntu-latest
     steps:

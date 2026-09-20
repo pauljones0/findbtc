@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -337,6 +338,54 @@ func TestCaseLogFailedAttempt(t *testing.T) {
 	}
 	if rec.Detections != 0 {
 		t.Errorf("detections %d, want 0", rec.Detections)
+	}
+}
+
+// A started scan that hashes zero bytes before failing (unreadable
+// source) records an error with no digests — finalizing the
+// empty-input digests would fake coverage the verifier must then
+// mismatch. The verifier reports it NOT SCANNED, like a pre-start
+// attempt, and stays green.
+func TestCaseLogZeroByteErrorHasNoDigests(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-unreadable; unix only")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through chmod 000")
+	}
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked.bin")
+	if err := os.WriteFile(locked, []byte("bestblock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(locked, 0644)
+	logPath := filepath.Join(dir, "case.jsonl")
+	err := ScanWithOptions(0, locked,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {})
+	if err == nil {
+		t.Fatal("unreadable target scanned clean")
+	}
+	recs := readCaseLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("want exactly 1 record, got %d", len(recs))
+	}
+	rec := recs[0]
+	if rec.Status != "error" {
+		t.Errorf("status %q, want error", rec.Status)
+	}
+	if rec.Hash.BytesHashed != 0 || rec.Hash.SHA256 != "" || rec.Hash.MD5 != "" {
+		t.Errorf("zero-byte error invents coverage: %+v", rec.Hash)
+	}
+	var out bytes.Buffer
+	if err := VerifyCaseLog(logPath, &out); err != nil {
+		t.Fatalf("verifier failed on an attempt-shaped record: %v", err)
+	}
+	if !strings.Contains(out.String(), "NOT SCANNED "+locked) {
+		t.Errorf("verifier must report NOT SCANNED, got:\n%s", out.String())
 	}
 }
 
