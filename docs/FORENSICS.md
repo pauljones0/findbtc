@@ -88,16 +88,22 @@ work; nothing is ever skipped without journaled proof.
 Resume refuses loudly when the journal does not match the run:
 a different target list or order, different profile / carve /
 JSON / reveal / baseline / case-log options, a legacy or range
-journal, or a corrupt file. A target whose size changed since its
-journal entry is rescanned from the start with a warning, since
-the old offset is meaningless. A skip re-validates the entry
-first: size and modification time must match, and a journaled
-content digest — recorded for every clean full pass — must
-re-hash. A same-size replacement with a forged timestamp fails
-verification and rescans; entries without a digest (interrupted
-then finished across runs, or journals from older binaries) skip
-on metadata alone. A batch journal opened by an old binary falls
-back to a full rescan rather than skipping bytes.
+journal, or a corrupt file. Every resume decision is authorized
+by a kernel-attested content identity (device, inode, size,
+modification and change timestamps) captured at run start and
+filed in the journal: a skip or offset resume proceeds only on
+an exact identity match, and anything else — a same-size
+replacement, a touched-up timestamp, a changed-middle rewrite,
+or a journal from an older binary that never recorded identity
+— rescans the target from the start with a warning. Raw volumes
+and pipes, which have no content identity, keep offset trust
+with their banked-member set dropped (their omission resumes are
+pure rewinding). A batch journal opened by an old binary falls
+back to a full rescan rather than skipping bytes. The one
+residual: Windows reports no change timestamp, so an in-place
+same-size rewrite with a restored timestamp still skips there —
+re-image or rescan evidence that may have been tampered with in
+place on Windows.
 
 A congested run — more nested archives in flight than the
 publication cap admits — drains what it admitted and then fails
