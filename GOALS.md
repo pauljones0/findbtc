@@ -56,7 +56,7 @@ completely solve the pain point?"**
 | 35 | Stdin scanning (pipe-first flows) | complete | 71eb324 |
 | 36 | Git-history secrets via pipes | complete | a5d9355 |
 | 37 | Homebrew tap + Windows managers | complete | 53ed052 |
-| 38 | Multi-target scans + unified report | queued | - |
+| 38 | Multi-target scans + unified report | complete | 3b67a44 |
 | 39 | Completions + man page | queued | - |
 
 ## Global done criteria (every goal)
