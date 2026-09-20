@@ -35,7 +35,7 @@ type CaseLog struct {
 // CaseSource identifies the scanned root target.
 type CaseSource struct {
 	Path        string `json:"path"`
-	Kind        string `json:"kind"` // raw, ewf, split, range
+	Kind        string `json:"kind"` // raw, ewf, split, range, stdin
 	Size        int64  `json:"size"`
 	StartOffset int64  `json:"start_offset"`
 	// Checkpoint names the progress journal when one was used; a
@@ -127,6 +127,8 @@ func caseKind(seed scanTarget) string {
 		return "split"
 	case *boundedScanTarget:
 		return "range"
+	case *stdinScanTarget:
+		return "stdin"
 	default:
 		return "raw"
 	}

@@ -15,6 +15,8 @@
 // Entry points by job:
 //
 //   - Raw bytes, devices, EWF/split images: Scan, ScanWithOptions.
+//   - Piped input (dd/ssh): ScanStdinWithOptions spills the stream
+//     to a bounded temp file, then scans it like a file.
 //   - Filesystem unallocated space: UnallocatedRangesAuto, then
 //     ScanRangesWithOptions over the extents.
 //   - Deleted files with names (-fs): ScanFS, ScanFSVolumes.

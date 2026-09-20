@@ -77,6 +77,10 @@ releases, and `go.mod` floors the language version at 1.24.
 
     findbtc -profile=secrets -walk ~/src > secrets.jsonl
 
+    # Eg. scan a piped image (same hits as scanning the file):
+
+    dd if=/dev/sda bs=1M | findbtc -json - > hits.jsonl
+
 Not sure which mode fits your target? Ask first — it only inspects,
 never scans:
 
@@ -117,6 +121,42 @@ contract: [schema/hits-v1.json](schema/hits-v1.json), documented in
 plus a classification of the carved bytes (`sqlite`, `bdb`, `gzip`, `zip`,
 `text`, `high-entropy`, ...).
 Never carve onto the device being scanned.
+
+### Piped input
+
+Raw scans and the secrets profile accept `-` for stdin, so forensic
+triage works over pipes the tool could never seek:
+
+    dd if=/dev/sdb bs=4M | findbtc -json - > hits.jsonl
+    ssh lab 'dd if=/dev/sda bs=4M' | findbtc -profile=secrets - > secrets.jsonl
+
+Detections are byte-identical to scanning the same bytes from a file:
+offsets are pipe offsets (byte 0 is the first byte read), and only
+the target label differs (`"target":"stdin"`, echoed in the
+human-readable description; case logs record kind `"stdin"` instead
+of `"raw"`). `-s` skips leading pipe bytes; `-extract-dir` carves
+work as usual.
+
+Pipes cannot be re-read, so the whole stream is spilled to a temp
+file before scanning starts (retries and carves re-open it). The
+spill lives in the OS temp dir as `findbtc-stdin-*` (`$TMPDIR` on
+Unix, `%TMP%` on Windows — point it at a big volume for large
+images) and is removed when the scan returns, success or failure —
+a crash may leave it behind for manual cleanup. The spill is capped
+at 1 TiB as a backstop against runaway pipes; past the cap the scan
+fails loudly rather than truncating, and a full temp disk fails
+loudly mid-spill. Spill progress notes print to stderr (one line per
+GiB) so large pipes stay visibly alive.
+
+One exception to file parity: forensic containers piped in (EnCase
+E01 sets, split raw segments) scan as raw bytes — segments cannot
+decode from one flat stream. The scan warns loudly when piped input
+carries EWF magic; pass the image file itself for a decoded scan.
+
+Modes that need what a pipe cannot give refuse with exit 1 instead of
+mis-scanning: `-fs` and `-unallocated-only` (filesystem offsets),
+`-walk` (a directory), `-checkpoint`/`-resume` (a journaled path —
+a journal naming a deleted temp file could never resume).
 
 ### Triage
 

@@ -175,10 +175,18 @@ func main() {
 		os.Exit(1)
 	}
 	if *fsPath != "" {
+		if *fsPath == "-" {
+			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -fs needs a seekable FILE with filesystem offsets; pipes cannot provide them")
+			os.Exit(1)
+		}
 		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume, *profile, *failOnHit)
 		return
 	}
 	if *walkPath != "" {
+		if *walkPath == "-" {
+			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -walk needs a directory to sweep; pipes cannot provide one")
+			os.Exit(1)
+		}
 		if *resume || *checkpointPath != "" {
 			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -checkpoint and -resume are not supported with -walk")
 			os.Exit(1)
@@ -197,9 +205,24 @@ func main() {
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE|-\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
+	}
+
+	// Pipes scan through a bounded spill (Goal 35): byte-identical
+	// detections, but no resume and no range modes — a journaled
+	// offset into a deleted temp file could never resume, and
+	// ranges need filesystem offsets pipes cannot provide.
+	if path == "-" {
+		if *unallocatedOnly {
+			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -unallocated-only needs filesystem offsets; pipes cannot provide them")
+			os.Exit(1)
+		}
+		if *resume || *checkpointPath != "" {
+			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume are not supported with stdin (pipes cannot resume)")
+			os.Exit(1)
+		}
 	}
 
 	start := *startOffset
@@ -271,6 +294,8 @@ func main() {
 	var err error
 	if *unallocatedOnly {
 		err = runUnallocated(path, *fsOffset, !fsOffsetSet, start, opts, printDetection)
+	} else if path == "-" {
+		err = detector.ScanStdinWithOptions(os.Stdin, start, opts, printDetection, newProgressReporter().onProgress)
 	} else {
 		err = detector.ScanWithOptions(start, path, opts, printDetection, newProgressReporter().onProgress)
 	}

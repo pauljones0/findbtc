@@ -56,6 +56,87 @@ func runTestBinary(t *testing.T, args ...string) (stdout, stderr string, exit in
 	return outBuf.String(), errBuf.String(), exit
 }
 
+// runTestBinaryStdin runs the test binary with stdin closed over input.
+func runTestBinaryStdin(t *testing.T, input string, args ...string) (stdout, stderr string, exit int) {
+	t.Helper()
+	cmd := exec.Command(testBinary, args...)
+	cmd.Stdin = strings.NewReader(input)
+	var outBuf, errBuf strings.Builder
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err := cmd.Run()
+	exit = 0
+	if err != nil {
+		ee, ok := err.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("cannot run test binary: %v", err)
+		}
+		exit = ee.ExitCode()
+	}
+	return outBuf.String(), errBuf.String(), exit
+}
+
+// A piped scan must report what a file scan of the same bytes
+// reports: identical -json hits modulo the target label, exit 0,
+// [COMPLETE] on stderr.
+func TestStdinPipeIdentity(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Repeat("q", 5000) + "wallet.dat" + strings.Repeat("q", 5000)
+	target := writeGateFile(t, dir, "pipe.bin", body)
+	fileOut, _, fileExit := runTestBinary(t, "-json", target)
+	if fileExit != 0 {
+		t.Fatalf("file scan exit %d", fileExit)
+	}
+	if !strings.Contains(fileOut, "wallet.dat") {
+		t.Fatalf("file scan found nothing; fixture is vacuous")
+	}
+	pipeOut, pipeErr, pipeExit := runTestBinaryStdin(t, body, "-json", "-")
+	if pipeExit != 0 {
+		t.Fatalf("pipe scan exit %d (stderr: %s)", pipeExit, firstLine(pipeErr))
+	}
+	if !strings.Contains(pipeErr, "[COMPLETE]") {
+		t.Errorf("pipe scan must print [COMPLETE], stderr:\n%s", pipeErr)
+	}
+	norm := func(s, target string) string {
+		return strings.ReplaceAll(s, `"target":"`+target+`"`, `"target":"NORM"`)
+	}
+	// Descriptions embed the same label ("at <target> in ... block").
+	normDesc := func(s, target string) string {
+		return strings.ReplaceAll(s, "at "+target+" in", "at NORM in")
+	}
+	want := normDesc(norm(fileOut, target), target)
+	got := normDesc(norm(pipeOut, "stdin"), "stdin")
+	if got != want {
+		t.Errorf("pipe hits differ from file hits:\npipe:\n%s\nfile:\n%s", got, want)
+	}
+}
+
+// Pipes have no offsets to journal, no ranges to seek, no directory
+// to sweep: every mode needing one must refuse loudly, not mis-scan.
+func TestStdinRefusals(t *testing.T) {
+	dir := t.TempDir()
+	ckpt := writeGateFile(t, dir, "ckpt.json", "{}\n")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"fs", []string{"-fs", "-"}, "seekable"},
+		{"walk", []string{"-walk", "-"}, "directory"},
+		{"checkpoint", []string{"-checkpoint", ckpt, "-"}, "not supported with stdin"},
+		{"resume", []string{"-checkpoint", ckpt, "-resume", "-"}, "not supported with stdin"},
+		{"unallocated", []string{"-unallocated-only", "-"}, "filesystem offsets"},
+	} {
+		_, stderr, exit := runTestBinary(t, tc.args...)
+		if exit != 1 {
+			t.Errorf("%s: expected exit 1, got %d", tc.name, exit)
+		}
+		if !strings.Contains(stderr, tc.want) {
+			t.Errorf("%s: stderr must contain %q, got:\n%s", tc.name, tc.want, stderr)
+		}
+	}
+}
+
 func writeGateFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

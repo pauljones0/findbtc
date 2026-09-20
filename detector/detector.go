@@ -221,8 +221,9 @@ type Options struct {
 	rangeCtx *rangeJournalCtx
 	// strictRoot makes runPipeline return an error when the root
 	// target fails or covers zero bytes (coverage honesty). Only
-	// ScanWithOptions sets it: range scans keep per-range tolerance,
-	// and nested targets always stay warn-and-continue.
+	// ScanWithOptions and ScanStdinWithOptions set it: range scans
+	// keep per-range tolerance, and nested targets always stay
+	// warn-and-continue.
 	strictRoot bool
 	// Reveal, when true, attaches seed-phrase words to BIP39 detections
 	// (owner recovery only). Default output never contains words.

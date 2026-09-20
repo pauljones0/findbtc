@@ -1086,11 +1086,34 @@ demands seekable files/devices. Forensic triage over pipes and
 container-native flows are second-class without it.
 
 **Completely solved when:**
-- [ ] Raw scan + secrets profile accept `-` with byte-identical
+- [x] Raw scan + secrets profile accept `-` with byte-identical
       detections vs file input (proven by test on fixtures).
-- [ ] Spill behavior documented (bounded spill file: where, how
+- [x] Spill behavior documented (bounded spill file: where, how
       big, cleanup); loud refusals for -fs/-walk/-checkpoint on
       pipes.
+
+Decision record (Goal 35): pipes scan spill-first — the stream
+lands in a bounded `$TMPDIR/findbtc-stdin-*` file (0600, 1 TiB
+backstop cap, removed on every return path), then the standard
+pipeline runs over the spill, so detections, carves, case logs,
+and progress are the file path by construction. The stable label
+is `"stdin"` (detections, progress, case-log path; kind
+`"stdin"`); only the label — echoed in Description — differs
+from a file scan. Size uses FileSize so even empty-input
+progress matches. Refusals (exit 1, before any stdin read):
+`-fs`/`-walk`/`-checkpoint`/`-resume`/`-unallocated-only` with
+`-`; the library refuses CheckpointPath/Resume too. Loud
+non-refusals: EWF magic warns (EWF2 advice points at libewf,
+since file scans refuse EWF2 as well); containers piped in scan
+raw — the one documented parity exception. The spill honors
+`opts.Context` (pre-cancel never reads; mid-spill stops between
+reads) and reports bytes-reached on every failure. Evidence: 14
+library tests (identity × profiles × offsets incl. progress
+sequences, archive identity, carve identity, cap/coalesced/
+boundary/read-error/cancel/cleanup, EWF1+2 warnings, case-log
+kind, empty) + 2 gate tests (real-binary pipe identity,
+5 refusals pinned to exit 1); adversarial review FAIL:10 then
+FAIL:6, all fixed with tests; full suite SUITE_EXIT=0.
 
 **Execute:**
 1. Stream with a bounded spill file; carve from the spill.
