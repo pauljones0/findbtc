@@ -248,6 +248,13 @@ func main() {
 		fmt.Fprintln(os.Stderr, "[watch] Exiting due to error: -balance-endpoint needs -watch")
 		os.Exit(1)
 	}
+	// Every scan mode below carves into -extract-dir; reap staging
+	// files killed runs left behind before numbering continues.
+	if *extractDir != "" {
+		if n := detector.CleanCarveTemps(*extractDir); n > 0 {
+			fmt.Fprintf(os.Stderr, "[main] reaped %d staged carve files from killed runs\n", n)
+		}
+	}
 	if *fsPath != "" {
 		if *fsPath == "-" {
 			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -fs needs a seekable FILE with filesystem offsets; pipes cannot provide them")
@@ -301,9 +308,10 @@ func main() {
 	}
 
 	// Multi-target runs (Goal 38) refuse the single-target-only
-	// inputs loudly: stdin can be consumed once, one -s offset
-	// cannot mean something per target, and a checkpoint journals
-	// one target's progress.
+	// inputs loudly: stdin can be consumed once and one -s
+	// offset cannot mean something per target. Checkpointing a
+	// batch journals a per-target manifest (Goal 42) instead of
+	// the single-target offset.
 	multi := len(targets) > 1
 	if multi {
 		for _, t := range targets {
@@ -316,8 +324,8 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -s offsets one target; it cannot offset a multi-target run")
 			os.Exit(2)
 		}
-		if *resume || *checkpointPath != "" {
-			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume journal one target; they are not supported with multiple targets")
+		if (*resume || *checkpointPath != "") && *unallocatedOnly {
+			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume with multiple targets journal whole files; they are not supported with -unallocated-only")
 			os.Exit(2)
 		}
 	}
@@ -353,8 +361,10 @@ func main() {
 		os.Exit(1)
 	}
 	// Range scans (-unallocated-only) resume inside the detector, which
-	// validates the range list; only single-target scans resume here.
-	if *resume && !*unallocatedOnly {
+	// validates the range list; batch runs resume per target in
+	// runMultiTarget. Only single-target whole-file scans resume
+	// here.
+	if *resume && !*unallocatedOnly && !multi {
 		cp, err := detector.ReadCheckpoint(*checkpointPath)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -364,6 +374,10 @@ func main() {
 				os.Exit(1)
 			}
 		} else {
+			if cp.IsBatch() {
+				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: checkpoint is a batch journal; resume it with the same target list\n")
+				os.Exit(1)
+			}
 			if cp.Path != path {
 				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: checkpoint is for %s, not %s\n", cp.Path, path)
 				os.Exit(1)
@@ -372,7 +386,13 @@ func main() {
 				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: checkpoint is a range-scan journal; resume it with -fs or -unallocated-only\n")
 				os.Exit(1)
 			}
-			start = cp.Offset
+			// Raw resume rewinds to the block grid at/before
+			// offset-overlap so needles straddling the 1MB
+			// journal point still match; the announcement and
+			// percent below name the rewound point actually
+			// scanned. -s keeps its exact offset and never
+			// rewinds.
+			start = detector.ResumeRewindOffset(0, cp.Offset)
 			msg := fmt.Sprintf("[main] Resuming %s at byte offset %d", path, start)
 			// Percent needs a known size; without one the byte
 			// offset stands alone (unchanged legacy shape).
@@ -384,6 +404,15 @@ func main() {
 	}
 
 	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume, Profile: *profile, Patch: *patchMode}
+	if *resume && !*unallocatedOnly && !multi && *extractDir != "" {
+		// A resumed run renumbers carves from 1 by default,
+		// which would overwrite pre-kill carves with
+		// different content; continue past them instead.
+		if seq := detector.NextCarveSeq(*extractDir); seq > 1 {
+			opts.CarveSeqStart = seq - 1
+			fmt.Fprintf(os.Stderr, "[main] carve numbering continues at hit-%06d\n", seq)
+		}
+	}
 	// History baselines suppress accepted history findings the way
 	// -walk baselines suppress accepted sweep findings; anything
 	// unfingerprinted always reports.
@@ -441,7 +470,8 @@ func main() {
 		}
 	}
 	if multi {
-		runMultiTarget(targets, *unallocatedOnly, *fsOffset, !fsOffsetSet, opts, printDetection, &hits, &suppressed, *failOnHit)
+		run := detector.BatchRun{Profile: *profile, CarveDir: *extractDir, Context: *contextBytes, JSON: *jsonOut, Reveal: *reveal, Baseline: *baselinePath, CaseLog: *caseLog}
+		runMultiTarget(targets, *unallocatedOnly, *fsOffset, !fsOffsetSet, opts, printDetection, &hits, &suppressed, *failOnHit, *checkpointPath, *resume, run)
 		return
 	}
 	var err error
@@ -501,21 +531,41 @@ func resolveScanTargets(positionals []string, listPath string) ([]string, error)
 // stream and one case-log record per target. Coverage follows the
 // Goal 31 walk rule: one bad target neither zeroes the run nor
 // lies — failures print loudly and the run continues; only zero
-// scanned targets exits 1.
-func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed bool, opts detector.Options, onDetection func(detector.Detection), hits, suppressed *int, failOnHit bool) {
+// scanned targets exits 1. With a checkpoint path the run is a
+// batch (Goal 42): a per-target manifest journals progress, so a
+// killed run resumes target by target instead of from scratch.
+func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed bool, opts detector.Options, onDetection func(detector.Detection), hits, suppressed *int, failOnHit bool, checkpointPath string, resume bool, run detector.BatchRun) {
 	prog := newProgressReporter()
 	scanned := 0
 	failed := 0
+	manifest := openBatchManifest(targets, checkpointPath, resume, run, opts)
 	// Carve numbering continues across targets (walk threads
 	// CarveSeqStart the same way): every delivered detection
 	// consumes a sequence number, including ones the baseline
 	// later suppresses — the pipeline carves before main sees
 	// the hit, so only the undelivered total keeps filenames
-	// unique.
+	// unique. A resumed run starts past the pre-kill carves so
+	// it never overwrites them with different content.
 	seqBase := opts.CarveSeqStart
-	for _, tgt := range targets {
+	if manifest != nil && resume && opts.CarveDir != "" {
+		if seq := detector.NextCarveSeq(opts.CarveDir); seq > 1 {
+			seqBase = seq - 1
+			fmt.Fprintf(os.Stderr, "[main] carve numbering continues at hit-%06d\n", seq)
+		}
+	}
+	for i, tgt := range targets {
+		start := int64(0)
+		if manifest != nil {
+			var skip bool
+			start, skip = batchEntryStart(manifest, i, tgt, resume, checkpointPath, opts.Log)
+			if skip {
+				scanned++
+				continue
+			}
+		}
 		targetOpts := opts
 		targetOpts.CarveSeqStart = seqBase
+		targetOpts.BatchJournal = manifest
 		var n int
 		counting := func(d detector.Detection) {
 			n++
@@ -525,9 +575,41 @@ func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed
 		if unallocated {
 			err = runUnallocated(tgt, fsOffset, autoSeed, 0, targetOpts, counting)
 		} else {
-			err = detector.ScanWithOptions(0, tgt, targetOpts, counting, prog.onProgress)
+			err = detector.ScanWithOptions(start, tgt, targetOpts, counting, prog.onProgress)
 		}
 		seqBase += n
+		if manifest != nil {
+			// The detector journals proven offsets and the
+			// completion digest into the FILE, never into
+			// this struct; adopt them before persisting the
+			// transition, so a retry resumes from this run's
+			// frontier instead of an older one and a later
+			// skip can re-hash. A completed scan covered
+			// its target through EOF.
+			if cp, rerr := detector.ReadCheckpoint(checkpointPath); rerr == nil {
+				for _, t := range cp.Targets {
+					if t.Path != tgt || t.State != detector.BatchActive {
+						continue
+					}
+					if err != nil && t.Offset > manifest.Targets[i].Offset {
+						manifest.Targets[i].Offset = t.Offset
+					}
+					if err == nil && t.SHA256 != "" {
+						manifest.Targets[i].SHA256 = t.SHA256
+					}
+				}
+			}
+			if err != nil {
+				manifest.Targets[i].State = detector.BatchFailed
+			} else {
+				manifest.Targets[i].State = detector.BatchComplete
+				manifest.Targets[i].Offset = manifest.Targets[i].Size
+				if manifest.Targets[i].Offset < 0 {
+					manifest.Targets[i].Offset = 0
+				}
+			}
+			detector.WriteBatchJournal(opts.Log, checkpointPath, detector.ManifestSnapshot(manifest))
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[main] failed: %s: %s\n", tgt, err.Error())
 			failed++
@@ -549,6 +631,109 @@ func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed
 		fmt.Fprintf(os.Stderr, "[main] %d suppressed by baseline\n", *suppressed)
 	}
 	gateOnHits("main", *hits, failOnHit)
+}
+
+// openBatchManifest loads or initializes the batch manifest for a
+// checkpointed multi-target run. It returns nil without a
+// checkpoint path (plain multi-target run, no journaling).
+// Resume with no journal starts over loudly; a corrupt or
+// mismatched journal refuses loudly — a journal must never
+// promise another run's artifacts.
+func openBatchManifest(targets []string, checkpointPath string, resume bool, run detector.BatchRun, opts detector.Options) *detector.BatchManifest {
+	if checkpointPath == "" {
+		return nil
+	}
+	if !resume {
+		if _, err := os.Stat(checkpointPath); err == nil {
+			fmt.Fprintf(os.Stderr, "[main] batch: starting new journal at %s (previous progress discarded)\n", checkpointPath)
+		}
+		m := detector.NewBatchManifest(targets, run)
+		detector.WriteBatchJournal(opts.Log, checkpointPath, detector.ManifestSnapshot(m))
+		return m
+	}
+	cp, err := detector.ReadCheckpoint(checkpointPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "[main] No checkpoint at %s, starting from the beginning\n", checkpointPath)
+			m := detector.NewBatchManifest(targets, run)
+			detector.WriteBatchJournal(opts.Log, checkpointPath, detector.ManifestSnapshot(m))
+			return m
+		}
+		fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	m, err := detector.MatchBatchManifest(cp, targets, run)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	return m
+}
+
+// batchEntryStart resolves one batch entry to a scan start offset:
+// completed entries skip (true), active and failed entries resume
+// against their journaled offset when identity still matches,
+// anything else scans from zero. Activating an entry persists the
+// transition before the scan starts, so a kill can only redo,
+// never skip, unproven work.
+func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, checkpointPath string, log io.Writer) (int64, bool) {
+	entry := &m.Targets[i]
+	size, mtime := detector.BatchIdentity(tgt)
+	if resume && entry.State == detector.BatchComplete {
+		// A skip vouches for these exact bytes: identity must
+		// match, and a journaled digest must re-hash. Anything
+		// else rescans loudly — a replaced target is new
+		// evidence, not covered evidence. Entries without a
+		// digest (resumed-then-completed, or a journal that
+		// predates digests) skip on identity alone.
+		skip := detector.BatchIdentityMatches(*entry, size, mtime)
+		if skip && entry.SHA256 != "" {
+			if err := detector.VerifyBatchDigest(tgt, size, entry.SHA256); err != nil {
+				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s fails digest verification (%s); rescanning from the start\n", tgt, err.Error())
+				skip = false
+			}
+		}
+		if skip {
+			fmt.Fprintf(os.Stderr, "[main] batch: skipping %s (already complete)\n", tgt)
+			return 0, true
+		}
+		// A digest mismatch warned above; an identity mismatch
+		// warns here. Either way the old offset and digest are
+		// meaningless for the bytes now on disk.
+		if !detector.BatchIdentityMatches(*entry, size, mtime) {
+			fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
+		}
+		entry.Offset = 0
+	}
+	start := int64(0)
+	if resume && (entry.State == detector.BatchActive || entry.State == detector.BatchFailed) {
+		verb := "resuming"
+		if entry.State == detector.BatchFailed {
+			verb = "retrying failed target"
+		}
+		if entry.Offset > 0 && detector.BatchIdentityMatches(*entry, size, mtime) {
+			start = detector.ResumeRewindOffset(0, entry.Offset)
+			msg := fmt.Sprintf("[main] batch: %s %s at byte offset %d", verb, tgt, start)
+			if size > 0 && start >= 0 && start <= size {
+				msg += fmt.Sprintf(" (continuing at %d%%)", start*100/size)
+			}
+			fmt.Fprintln(os.Stderr, msg)
+		} else {
+			if entry.Offset > 0 {
+				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since the journal entry; rescanning from the start\n", tgt)
+			} else {
+				fmt.Fprintf(os.Stderr, "[main] batch: %s %s from the start\n", verb, tgt)
+			}
+			entry.Offset = 0
+		}
+	}
+	entry.State = detector.BatchActive
+	entry.Size, entry.Mtime = size, mtime
+	// A new scan certifies a new digest (or none); the old one
+	// must not linger into this run's journal entries.
+	entry.SHA256 = ""
+	detector.WriteBatchJournal(log, checkpointPath, detector.ManifestSnapshot(m))
+	return start, false
 }
 
 // runUnallocated implements --unallocated-only: scan just the free space

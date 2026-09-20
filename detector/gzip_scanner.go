@@ -71,7 +71,7 @@ func (r *gzipTargetReader) Close() error {
 	return r.r.Close()
 }
 
-func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer) {
+func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer, gate *pubGate) {
 	openedFiles := 0
 	for {
 		var block *Block
@@ -79,6 +79,16 @@ func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sc
 		case <-ctx.Done():
 			return
 		case block = <-in:
+		}
+
+		if block.barrier != nil {
+			// Drain barrier: forward untouched, no EOF accounting.
+			select {
+			case <-ctx.Done():
+				return
+			case out <- block:
+			}
+			continue
 		}
 
 		if block == EOF {
@@ -105,7 +115,7 @@ func scanGzipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sc
 			// Occurrences fully inside the overlap prefix were already
 			// handled with the previous block.
 			if abs+len(GZIP_HEADER) > block.overlap && gzipHeaderPlausible(data[abs:]) {
-				openedFiles += scanGzipFile(block.source, block.offset+int64(abs), scanTargets, log)
+				openedFiles += scanGzipFile(block.source, block.offset+int64(abs), scanTargets, log, gate)
 			}
 			i = abs + 1
 		}
@@ -133,7 +143,7 @@ func gzipHeaderPlausible(tail []byte) bool {
 	return tail[2] == 8 && tail[3]&0xE0 == 0
 }
 
-func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget, log io.Writer) int {
+func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget, log io.Writer, gate *pubGate) int {
 	if source.Depth()+1 > maxArchiveDepth {
 		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
 		return 0
@@ -157,9 +167,11 @@ func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarg
 		return 0
 	}
 
-	scanTargets <- &gzipScanTarget{
+	if !gatePublish(gate, scanTargets, &gzipScanTarget{
 		source:     source,
 		gzipOffset: gzipOffset,
+	}) {
+		return 0
 	}
 
 	return 1

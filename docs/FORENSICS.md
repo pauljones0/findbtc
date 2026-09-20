@@ -75,6 +75,57 @@ merging outputs). One journal holds one range list: checkpointing is
 refused across several auto-seeded volumes in one `-fs` run — pin one
 volume with `-fs-offset` and journal each volume separately.
 
+Batch runs (several `TARGET` files with `-checkpoint`) journal a
+per-target manifest instead of one offset. Each entry tracks its
+target's state — pending, active, complete, failed — plus the
+proven byte offset for the in-flight one. A killed batch resumes
+with `-resume`: completed targets print `batch: skipping …` and
+are never rescanned, the interrupted target resumes from its
+journaled offset (rewound to the block grid, same seam rule as
+above), and failed targets are retried. Every crash window redoes
+work; nothing is ever skipped without journaled proof.
+
+Resume refuses loudly when the journal does not match the run:
+a different target list or order, different profile / carve /
+JSON / reveal / baseline / case-log options, a legacy or range
+journal, or a corrupt file. A target whose size changed since its
+journal entry is rescanned from the start with a warning, since
+the old offset is meaningless. A skip re-validates the entry
+first: size and modification time must match, and a journaled
+content digest — recorded for every clean full pass — must
+re-hash. A same-size replacement with a forged timestamp fails
+verification and rescans; entries without a digest (interrupted
+then finished across runs, or journals from older binaries) skip
+on metadata alone. A batch journal opened by an old binary falls
+back to a full rescan rather than skipping bytes.
+
+A congested run — more nested archives in flight than the
+publication cap admits — drains what it admitted and then fails
+honestly with an `incomplete coverage` error instead of clean
+completion: the case log records status `error`, the checkpoint
+keeps only its last skip-free proven point (completion never
+journals), and a batch entry lands in `failed`, never `complete`.
+Resume retries from the frozen point and re-covers the omitted
+bytes, so an uncongested retry concatenates to the full set
+(same seam-dedup rule as above for re-reported hits).
+
+Carves survive kills: every carve file commits atomically (a kill
+leaves complete files, never torn bytes), a resumed run continues
+carve numbering past the pre-kill files instead of overwriting
+them, and staging files from killed runs are reaped on the next
+start. Hits re-derived in the rewind seam carve again under new
+numbers — deduplicate carved bytes by content hash when merging.
+
+Two loss notes. First, stdout printed before a SIGKILL is gone
+with the process: pipe `-json` output to a file
+(`-json … > hits.jsonl`) so kill plus resume concatenate to the
+full set. Second, zip members recovered from local headers (no
+central directory) and discovered before the journal point stay
+discovered only when intact archives re-announce them on resume;
+genuinely directory-less fragments ahead of the frontier are a
+known resume boundary — re-image and run uninterrupted when that
+class of evidence matters.
+
 ## 4. Read the case log
 
 `-case-log case.jsonl` appends one JSON record per requested target (a

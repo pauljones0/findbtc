@@ -116,7 +116,7 @@ func runScanBlocks(t *testing.T, target scanTarget, onBadSector BadSectorFunc) [
 		empty <- &Block{data: make([]byte, blockSize+scanOverlap())}
 	}
 	targets <- target
-	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{OnBadSector: onBadSector}, make(chan error, 1))
+	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{OnBadSector: onBadSector}, make(chan error, 1), nil, nil)
 
 	var blocks []*Block
 	timeout := time.After(15 * time.Second)
@@ -251,7 +251,15 @@ func TestCheckpointWrittenDuringScan(t *testing.T) {
 		empty <- &Block{data: make([]byte, blockSize+scanOverlap())}
 	}
 	targets <- target
-	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{CheckpointPath: ckpt}, make(chan error, 1))
+	// Real journal control: the harness plays the stages, acking
+	// drain barriers and reporting quiescence over its own
+	// channels, so this test exercises the proven-frontier drain
+	// path production uses — not a legacy direct write.
+	jc := &journalCtl{
+		quiet: func() bool { return len(out) == 0 && len(targets) == 0 },
+		final: make(chan *pendingFrontier, 1),
+	}
+	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{CheckpointPath: ckpt}, make(chan error, 1), jc, nil)
 
 	ticker := time.NewTicker(25 * time.Millisecond)
 	defer ticker.Stop()
@@ -261,6 +269,10 @@ func TestCheckpointWrittenDuringScan(t *testing.T) {
 		case b := <-out:
 			if b == EOF {
 				t.Fatal("scan finished before a mid-scan checkpoint was observed")
+			}
+			if b.barrier != nil {
+				b.barrier <- struct{}{}
+				continue
 			}
 			empty <- b
 		case <-ticker.C:
@@ -274,6 +286,94 @@ func TestCheckpointWrittenDuringScan(t *testing.T) {
 			}
 		case <-timeout:
 			t.Fatal("timed out waiting for a mid-scan checkpoint")
+		}
+	}
+}
+
+// A journaled frontier counts bytes already pushed downstream: the
+// drain must run after the block carrying the frontier travels, or
+// a kill between journal-write and push strands bytes past the
+// rewind. Barriers flow through the same FIFO channel as blocks,
+// so the first barrier's position in the receive stream proves
+// the order deterministically: the cadence block must arrive
+// before it, never after.
+func TestDrainJournalsAfterPush(t *testing.T) {
+	dir := t.TempDir()
+	ckpt := filepath.Join(dir, "ckpt.json")
+
+	data := testPattern(2 << 20)
+	reads := 0
+	target := &flakyTarget{data: data, badStart: -1, badEnd: -1, reads: &reads}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	targets := make(chan scanTarget, 4)
+	empty := make(chan *Block, 8)
+	out := make(chan *Block, 16)
+	for i := 0; i < 8; i++ {
+		empty <- &Block{data: make([]byte, blockSize+scanOverlap())}
+	}
+	targets <- target
+	jc := &journalCtl{
+		quiet: func() bool { return len(out) == 0 && len(targets) == 0 },
+		final: make(chan *pendingFrontier, 1),
+	}
+	go scanBlocks(ctx, targets, empty, out, func(ProgressInfo) {}, Options{CheckpointPath: ckpt}, make(chan error, 1), jc, nil)
+
+	blocks := 0
+	barrierAt := -1
+	timeout := time.After(20 * time.Second)
+	for barrierAt < 0 {
+		select {
+		case b := <-out:
+			if b == EOF {
+				t.Fatal("scan finished before any drain barrier")
+			}
+			if b.barrier != nil {
+				barrierAt = blocks
+				b.barrier <- struct{}{}
+				continue
+			}
+			blocks++
+			empty <- b
+		case <-timeout:
+			t.Fatal("timed out waiting for a drain barrier")
+		}
+	}
+	if barrierAt != checkpointBlockInterval {
+		t.Errorf("first barrier after %d blocks, want %d (the cadence block must travel first)",
+			barrierAt, checkpointBlockInterval)
+	}
+	// The acked drain must journal the cadence frontier: the ack
+	// proves the pushed prefix delivered, so the journaled offset
+	// is its end.
+	want := int64(checkpointBlockInterval * blockSize)
+	deadline := time.After(20 * time.Second)
+	for {
+		select {
+		case b := <-out:
+			if b == EOF {
+				t.Fatal("scan finished before the drain journaled")
+			}
+			if b.barrier != nil {
+				b.barrier <- struct{}{}
+				continue
+			}
+			empty <- b
+		default:
+		}
+		if cp, err := ReadCheckpoint(ckpt); err == nil && cp.Offset > 0 {
+			cancel()
+			if cp.Offset != want {
+				t.Errorf("journaled frontier %d, want cadence end %d", cp.Offset, want)
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for the drain journal")
+		case <-time.After(time.Millisecond):
 		}
 	}
 }

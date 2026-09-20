@@ -3,9 +3,13 @@ package detector
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"hash"
 	"io"
 	"os"
+	"sync/atomic"
 	"time"
 )
 
@@ -31,6 +35,12 @@ type Block struct {
 
 	// The target this block came from
 	source scanTarget
+
+	// barrier, when non-nil, marks a drain-barrier sentinel: stages
+	// forward it untouched (no detection, no EOF accounting, never
+	// recycled to the block pool) and detectWallets acknowledges by
+	// sending on it once every block ahead of it is delivered.
+	barrier chan<- struct{}
 }
 
 // Bytes read per scan step; consecutive blocks additionally re-scan a short
@@ -229,6 +239,12 @@ type Options struct {
 	// rangeCtx carries range-journal state into runPipeline; set by
 	// ScanRangesWithOptions, never by callers.
 	rangeCtx *rangeJournalCtx
+	// BatchJournal, when non-nil, makes proven frontiers journal
+	// the batch manifest (targets plus bound run options) with
+	// the active entry's offset filled in. Set by batch callers
+	// (main's multi-target loop); the detector reads it at
+	// journal points but never mutates it.
+	BatchJournal *BatchManifest
 	// strictRoot makes runPipeline return an error when the root
 	// target fails or covers zero bytes (coverage honesty). Only
 	// ScanWithOptions and ScanStdinWithOptions set it: range scans
@@ -550,6 +566,14 @@ func rewindOffset(rangeStart, offset int64) int64 {
 	return rangeStart + ((back-rangeStart)/blockSize)*blockSize
 }
 
+// ResumeRewindOffset is the exported form of rewindOffset for the
+// raw single-target resume path in main: resume seeks the rewound
+// grid point so straddling patterns still match, while -s keeps
+// its exact user offset.
+func ResumeRewindOffset(rangeStart, offset int64) int64 {
+	return rewindOffset(rangeStart, offset)
+}
+
 // readRangeResume loads and validates a range journal: path, exact range
 // list, index bounds, offset within the range. It returns the range index
 // and offset to continue from; resume=false means the journal records a
@@ -587,16 +611,210 @@ func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (idx i
 	return cp.RangeIndex, cp.Offset, true, nil
 }
 
+// pendingFrontier is a journal point: the root offset read so far
+// plus, for range scans, the range list and index. Mid-root points
+// are written only after a drain proves every byte at or before
+// them delivered; the root-end point travels to runPipeline,
+// which writes it on clean EOF. digest carries the cumulative
+// covered-bytes SHA-256 at the frontier: mid-run points pin the
+// prefix a resume must re-verify before continuing, and the
+// completion point (complete) pins the whole target for skips.
+type pendingFrontier struct {
+	desc     string
+	offset   int64
+	ranges   []FSExtent
+	index    int
+	digest   string
+	complete bool
+}
+
+// batchDigest streams the root bytes of one batch scan for the
+// manifest digest. Only scanBlocks feeds it, sequentially, so no
+// mutex is needed.
+type batchDigest struct {
+	h hash.Hash
+}
+
+func newBatchDigest() *batchDigest {
+	return &batchDigest{h: sha256.New()}
+}
+
+func (d *batchDigest) write(p []byte) {
+	d.h.Write(p)
+}
+
+func (d *batchDigest) hex() string {
+	return hex.EncodeToString(d.h.Sum(nil))
+}
+
+// maxOutstandingPubs caps published-but-unconsumed nested targets
+// below the scanTargets channel capacity. Publishers admit through
+// the gate instead of blocking on a full channel, so a hostile
+// archive (a zip64 directory with millions of members, a target
+// dense with local headers) degrades to loud skips instead of
+// wedging every stage behind a consumer that cannot run —
+// including the mid-root drain, which parks its only consumer on
+// a barrier ack. Inputs that complete today with fewer nested
+// targets in flight behave exactly as before; only runs that
+// would hang now skip, and the run then fails honestly with an
+// incomplete-coverage error (never clean completion): the journal
+// freezes at its last skip-free proven point so a retry re-covers
+// the omitted bytes. A var (not const) so tests can trip the gate
+// with small inputs.
+var maxOutstandingPubs int64 = 512 * 1024
+
+// pubGate bounds outstanding nested publications. All methods are
+// nil-safe: a nil gate admits everything with legacy blocking
+// sends, for direct unit-test drivers with no pipeline.
+type pubGate struct {
+	outstanding atomic.Int64
+	skipped     atomic.Int64
+	warned      atomic.Bool
+	log         io.Writer
+}
+
+func newPubGate(log io.Writer) *pubGate {
+	return &pubGate{log: log}
+}
+
+// tryPublish admits one publication, or refuses past the cap
+// (counting the skip and warning once per run).
+func (g *pubGate) tryPublish() bool {
+	if g == nil {
+		return true
+	}
+	for {
+		o := g.outstanding.Load()
+		if o >= maxOutstandingPubs {
+			g.skipped.Add(1)
+			if g.warned.CompareAndSwap(false, true) {
+				logLinef(g.log, "[scan] WARNING: nested publication backlog past %d; further archives skip (total reported at end)\n", maxOutstandingPubs)
+			}
+			return false
+		}
+		if g.outstanding.CompareAndSwap(o, o+1) {
+			return true
+		}
+	}
+}
+
+// forcePublish counts a publication that must run (the seed).
+func (g *pubGate) forcePublish() {
+	if g == nil {
+		return
+	}
+	g.outstanding.Add(1)
+}
+
+// consumed releases one outstanding publication.
+func (g *pubGate) consumed() {
+	if g == nil {
+		return
+	}
+	g.outstanding.Add(-1)
+}
+
+func (g *pubGate) skippedCount() int64 {
+	if g == nil {
+		return 0
+	}
+	return g.skipped.Load()
+}
+
+// gatePublish sends t unless the gate is full. Admitted sends
+// never block: outstanding counts exactly the channel's contents
+// (receives are the only removal, each paired with consumed), so
+// below the cap the channel always has room.
+func gatePublish(g *pubGate, ch chan scanTarget, t scanTarget) bool {
+	if !g.tryPublish() {
+		return false
+	}
+	ch <- t
+	return true
+}
+
+// BatchManifest is the in-memory batch journal. Main owns target
+// states and transitions; the detector only fills the active
+// entry's proven offset into the FILE it writes, never mutating
+// this struct, so ownership stays single-writer on both sides.
+type BatchManifest struct {
+	Targets []BatchTarget
+	Run     BatchRun
+}
+
+// journalCtl coordinates proven journaling between scanBlocks and
+// runPipeline. Nil means no checkpoint path: no drains, no
+// barrier rounds, no completion write — the pipeline behaves
+// exactly as if journaling did not exist.
+type journalCtl struct {
+	// quiet reports pipeline quiescence: every stage queue and
+	// the nested backlog observably empty.
+	quiet func() bool
+	// final carries the root-end frontier to runPipeline, which
+	// writes it on clean EOF only: EOF delivery already proves
+	// every byte delivered, while error/cancel paths keep the
+	// older proven mark instead of certifying doubt. Buffered
+	// one: the root ends once, so the send never blocks, and a
+	// clean-EOF return always finds it (sent before the EOF).
+	final chan *pendingFrontier
+	// digest streams the root bytes of a batch scan for the
+	// manifest digest. Non-nil only under a batch journal; a
+	// completion frontier from a zero start adopts its hex.
+	// Truncated or resumed coverage simply never verifies, so a
+	// skip falls back to a rescan, never to blind trust.
+	digest *batchDigest
+}
+
 // writeScanCheckpoint journals root-target progress: a range entry when
 // the pipeline runs inside ScanRangesWithOptions, a legacy entry
 // otherwise.
-func writeScanCheckpoint(opts Options, target scanTarget, offset int64) {
-	log := opts.logWriter()
+// frontierFor builds the journal point for target read up to offset.
+func frontierFor(opts Options, target scanTarget, offset int64) *pendingFrontier {
+	p := &pendingFrontier{desc: target.Describe(), offset: offset}
 	if opts.rangeCtx != nil {
-		writeCheckpointRange(log, opts.CheckpointPath, target.Describe(), opts.rangeCtx.ranges, opts.rangeCtx.index, offset)
+		p.ranges = append([]FSExtent(nil), opts.rangeCtx.ranges...)
+		p.index = opts.rangeCtx.index
+	}
+	return p
+}
+
+// writeFrontier journals a proven frontier: a batch manifest entry
+// when the pipeline runs under a batch journal, a range entry
+// inside ScanRangesWithOptions, a legacy entry otherwise. Batch
+// journals always carry Offset 0 in the legacy fields so an old
+// binary, which cannot see Targets, falls back to a full rescan
+// of a path-matched target instead of silently skipping bytes.
+func writeFrontier(opts Options, p *pendingFrontier) {
+	log := opts.logWriter()
+	if opts.BatchJournal != nil {
+		bj := opts.BatchJournal
+		tgts := append([]BatchTarget(nil), bj.Targets...)
+		for i := range tgts {
+			if tgts[i].State == BatchActive {
+				tgts[i].Offset = p.offset
+				// Only completions carry a digest; mid-run
+				// points must not blank one already filed.
+				if p.digest != "" {
+					tgts[i].SHA256 = p.digest
+				}
+			}
+		}
+		cp := Checkpoint{Offset: 0, Targets: tgts}
+		if len(tgts) > 0 {
+			cp.Path = tgts[0].Path
+		} else {
+			cp.Path = p.desc
+		}
+		run := bj.Run
+		cp.Run = &run
+		WriteBatchJournal(log, opts.CheckpointPath, cp)
 		return
 	}
-	writeCheckpoint(log, opts.CheckpointPath, target.Describe(), offset)
+	if p.ranges != nil {
+		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset)
+		return
+	}
+	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset)
 }
 
 // firstRangeDiff returns the first index where two range lists differ, or
@@ -684,18 +902,41 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 	}
 
 	// 1. Scan target files, breaking them into blocks of data to work with
-	go scanBlocks(ctx, scanTargets, emptyBlocks, zipDetectionQueue, onProgress, opts, rootDone)
+	// Journal control exists only with a checkpoint path; without
+	// one the pipeline behaves exactly as if journaling did not
+	// exist (no drains, no barrier rounds, no completion write).
+	var jc *journalCtl
+	if opts.CheckpointPath != "" {
+		jc = &journalCtl{
+			quiet: func() bool {
+				return len(zipDetectionQueue) == 0 && len(gzipDetectionQueue) == 0 &&
+					len(walletDetectionQueue) == 0 && len(scanTargets) == 0
+			},
+			final: make(chan *pendingFrontier, 1),
+		}
+		if opts.BatchJournal != nil {
+			jc.digest = newBatchDigest()
+		}
+	}
+	gate := newPubGate(opts.logWriter())
+	defer func() {
+		if n := gate.skippedCount(); n > 0 {
+			opts.logf("[scan] WARNING: skipped %d nested archives past the %d publication cap; coverage is incomplete\n", n, maxOutstandingPubs)
+		}
+	}()
+	go scanBlocks(ctx, scanTargets, emptyBlocks, zipDetectionQueue, onProgress, opts, rootDone, jc, gate)
 
 	// 2. Pass blocks to zipfile detection; any files found will be published as new targets
-	go scanZipFiles(ctx, zipDetectionQueue, gzipDetectionQueue, scanTargets, opts.logWriter())
+	go scanZipFiles(ctx, zipDetectionQueue, gzipDetectionQueue, scanTargets, opts.logWriter(), gate)
 
 	// 3. Pass blocks to gzip file detection; any files found will be published as new targets
-	go scanGzipFiles(ctx, gzipDetectionQueue, walletDetectionQueue, scanTargets, opts.logWriter())
+	go scanGzipFiles(ctx, gzipDetectionQueue, walletDetectionQueue, scanTargets, opts.logWriter(), gate)
 
 	// 3. And, finally, pass raw and uncompressed blocks both to wallet detection
 	go detectWallets(ctx, walletDetectionQueue, emptyBlocks, onDetection, onComplete, opts, secrets)
 
 	// Publish the seed target to scan
+	gate.forcePublish()
 	scanTargets <- seed
 
 	// Wait for the system to signal outcome — or for the caller to
@@ -713,6 +954,23 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 				signal = rootErr
 			}
 		}
+		if signal == io.EOF {
+			if n := gate.skippedCount(); n > 0 {
+				// Drain-then-error: the pipeline delivered
+				// everything admitted, but dropped nested
+				// work is omitted coverage, not clean
+				// completion. The error keeps the case log
+				// (error, never complete), the checkpoint
+				// (no completion frontier below), and the
+				// batch manifest (failed, never complete)
+				// honest; the journal freeze in
+				// drainFrontier pins resume to the last
+				// skip-free proven point so a retry
+				// re-covers the omitted bytes instead of
+				// skipping them forever.
+				signal = fmt.Errorf("incomplete coverage: skipped %d nested archives past the %d publication cap; retry to recover", n, maxOutstandingPubs)
+			}
+		}
 		if rec != nil {
 			status, runErr := "complete", error(nil)
 			if signal != io.EOF {
@@ -723,6 +981,19 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 			}
 		}
 		if signal == io.EOF {
+			// Clean EOF proves every byte delivered (final-EOF
+			// forwarding implies every published target was
+			// read and every block processed), so the
+			// completion frontier is safe to journal now.
+			// Error paths keep the older proven mark
+			// instead of certifying doubt.
+			if jc != nil {
+				select {
+				case ff := <-jc.final:
+					writeFrontier(opts, ff)
+				default:
+				}
+			}
 			return nil
 		}
 		return signal
@@ -737,21 +1008,8 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 }
 
 func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *Block, out chan *Block,
-	onProgress func(ProgressInfo), opts Options, rootDone chan<- error) {
-	var f TargetReader
-	var currentOffset int64
-	overlap := scanOverlap()
-	tail := make([]byte, overlap)
-	var haveTail bool
+	onProgress func(ProgressInfo), opts Options, rootDone chan<- error, jc *journalCtl, gate *pubGate) {
 	firstTarget := true
-	var checkpointRoot bool
-	var blocksSinceCheckpoint int
-	// Root-outcome tracking for strictRoot pipelines: rootErr keeps the
-	// first root failure, rootCovered the bytes actually read from the
-	// root, rootExpected the bytes the root claimed (unknown when < 0).
-	var rootErr error
-	var rootCovered, rootExpected int64
-
 	for {
 		var target scanTarget
 		select {
@@ -759,202 +1017,331 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 			return
 		case target = <-targets:
 		}
+		gate.consumed()
 
 		// Only the root target is journaled; nested archives re-scan on
 		// resume, which is cheap relative to the device that holds them.
-		checkpointRoot = firstTarget
 		isRoot := firstTarget
 		firstTarget = false
-		strict := isRoot && opts.strictRoot
-
-		opts.logf("[scan] Starting new target: %s\n", target.Describe())
-		totalBytes, err := target.Size()
-		if err != nil {
-			if !strict {
-				opts.logf("[scan] Unable to scan target: %s\n", err.Error())
-				goto nextTarget
-			}
-			// The size feeds only the progress total and the
-			// coverage check: a strict root with an unreadable
-			// size (empty file, device node) still gets its
-			// Open attempt below, with an unknown total like
-			// nested gzip members. No warning here: Open and
-			// the read loop report real failures themselves,
-			// and an unsized-but-readable root is a success.
-			totalBytes = -1
+		outcome, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, target, isRoot)
+		if !alive {
+			return
 		}
-		if strict {
-			rootExpected = totalBytes - target.StartOffset()
-		}
-
-		if f, err = target.Open(); err != nil {
-			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
-			if strict {
-				rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
-			}
-			goto nextTarget
-		}
-
-		if _, err = f.Seek(target.StartOffset(), 0); err != nil {
-			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
-			if strict {
-				rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
-			}
-			goto nextTarget
-		}
-
-		currentOffset = target.StartOffset()
-		haveTail = false
-		for {
-			var block *Block
-			select {
-			case <-ctx.Done():
-				f.Close()
-				return
-			case block = <-emptyBlocks:
-			}
-
-			prefix := 0
-			if haveTail {
-				copy(block.data, tail)
-				prefix = overlap
-			}
-			read, err := io.ReadFull(f, block.data[prefix:prefix+blockSize])
-			if read == 0 && isCleanEnd(err) {
-				// Normal end of target; the block is unused.
-				emptyBlocks <- block
-				goto nextTarget
-			}
-			if read == 0 {
-				// Hard read error with no bytes. On seekable targets the
-				// range is retried, then skipped so the rest of the target
-				// is still scanned; a skipped gap breaks overlap continuity.
-				var seekable bool
-				read, err, seekable = retryBlockRead(f, block.data[prefix:prefix+blockSize], currentOffset)
-				if read == 0 && isCleanEnd(err) {
-					emptyBlocks <- block
-					goto nextTarget
-				}
-				if read == 0 && !seekable {
-					opts.logf("[scan] Unable to scan target: %s\n", err.Error())
-					if strict && rootErr == nil {
-						rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
-					}
-					emptyBlocks <- block
-					goto nextTarget
-				}
-				if read == 0 {
-					reportBadSector(target, currentOffset, currentOffset+blockSize, err, opts.OnBadSector, opts.logWriter())
-					currentOffset += blockSize
-					haveTail = false
-					emptyBlocks <- block
-					// Position is indeterminate after failed reads.
-					if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
-						opts.logf("[scan] Unable to scan target: %s\n", serr.Error())
-						if strict && rootErr == nil {
-							rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), serr)
-						}
-						goto nextTarget
-					}
-					continue
-				}
-			}
-			if strict {
-				rootCovered += int64(read)
-			}
-			// A partial read with an error still yields a valid block: the
-			// bytes already returned are real target data. This matters for
-			// nested gzip streams followed by trailing garbage, where the
-			// reader reports the end of the stream as a format error instead
-			// of a clean EOF.
-
-			// The block carries the overlap prefix plus the newly read bytes.
-			// block.offset pins the absolute offset of data[0] so archive
-			// scanners derive exact nested offsets; the reported location
-			// stays on the logical block start to keep offsets stable.
-			block.length = prefix + read
-			block.overlap = prefix
-			block.offset = currentOffset - int64(prefix)
-			if opts.caseRec != nil && checkpointRoot {
-				// Only the newly read bytes: the overlap prefix was
-				// hashed with the previous block, skipped ranges never.
-				opts.caseRec.hash(block.data[prefix : prefix+read])
-			}
-			block.final = isCleanEnd(err)
-			block.location = fmt.Sprintf("%s in %dkB block at byte offset %d", target.Describe(), blockSize/1024, currentOffset)
-			block.source = target
-
-			if block.length >= overlap {
-				copy(tail, block.data[block.length-overlap:block.length])
-			}
-			haveTail = true
-			currentOffset += int64(read)
-			scanned := currentOffset
-			if totalBytes > 0 && scanned > totalBytes {
-				scanned = totalBytes // skips may step past the end
-			}
-			onProgress(ProgressInfo{
-				CurrentTarget:    target.Describe(),
-				ScannedBytes:     scanned,
-				TotalBytes:       totalBytes,
-				UnscannedTargets: len(targets)})
-
-			if checkpointRoot && opts.CheckpointPath != "" {
-				blocksSinceCheckpoint++
-				if blocksSinceCheckpoint >= checkpointBlockInterval {
-					blocksSinceCheckpoint = 0
-					writeScanCheckpoint(opts, target, currentOffset)
-				}
-			}
-
-			abort := false
-			if err != nil && !isCleanEnd(err) {
-				// Good bytes above, but the stream position is
-				// indeterminate: reposition so the next read retries the
-				// failed region. Non-seekable targets end here instead.
-				if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
-					abort = true
-				}
-			}
-			select {
-			case <-ctx.Done():
-				f.Close()
-				return
-			case out <- block:
-			}
-			if block.final || abort {
-				goto nextTarget
-			}
-		}
-
-	nextTarget:
-		if strict {
+		if isRoot && opts.strictRoot {
 			// The root promised bytes but yielded none (vanished
 			// mid-run, fully unreadable): that is a failed scan,
 			// not a clean one. Unknown or already-consumed sizes
 			// (empty files, resume at EOF, -s past the end) stay
 			// successes.
-			if rootErr == nil && rootCovered == 0 && rootExpected > 0 {
-				rootErr = fmt.Errorf("cannot scan %s: covered 0 of %d expected bytes",
-					target.Describe(), rootExpected)
+			if outcome.rootErr == nil && outcome.covered == 0 && outcome.expected > 0 {
+				outcome.rootErr = fmt.Errorf("cannot scan %s: covered 0 of %d expected bytes",
+					target.Describe(), outcome.expected)
 			}
-			rootDone <- rootErr
+			rootDone <- outcome.rootErr
 		}
-		if checkpointRoot && opts.CheckpointPath != "" && f != nil {
-			writeScanCheckpoint(opts, target, currentOffset)
+		if isRoot && jc != nil && outcome.opened {
+			// The completion frontier supersedes any 1MB point;
+			// runPipeline writes it on clean EOF, when delivery
+			// is proven. A clean full pass from zero also
+			// certifies the covered-bytes digest, so a later
+			// skip can re-hash instead of trusting metadata.
+			ff := frontierFor(opts, target, outcome.end)
+			if jc.digest != nil && target.StartOffset() == 0 {
+				ff.digest = jc.digest.hex()
+			}
+			jc.final <- ff
 		}
-		// Close before signalling EOF downstream: the completion races
-		// ahead, and on Windows an open handle blocks deleting the file
-		// (including test TempDir cleanup) after Scan returns.
+	}
+}
+
+// readOutcome carries a finished target read back to scanBlocks:
+// bytes covered and expected for strict accounting, the end
+// offset for the completion frontier. opened is false when the
+// target never yielded a reader.
+type readOutcome struct {
+	covered  int64
+	expected int64
+	end      int64
+	opened   bool
+	rootErr  error
+}
+
+// readTarget reads one target fully into blocks, pushing exactly
+// one EOF unless canceled. It is reentrant: every read owns its
+// file, offset, and tail as locals, so a mid-root drain can pause
+// the root by reading nested targets — the stack is the
+// save/restore. Only root reads drain and journal (jc non-nil);
+// nested reads are plain, so drains never nest.
+func readTarget(ctx context.Context, targets chan scanTarget, emptyBlocks chan *Block, out chan *Block,
+	onProgress func(ProgressInfo), opts Options, jc *journalCtl, gate *pubGate, target scanTarget, isRoot bool) (readOutcome, bool) {
+	var outcome readOutcome
+	var f TargetReader
+	defer func() {
+		// Close before the EOF downstream: the completion races
+		// ahead, and on Windows an open handle blocks deleting
+		// the file (including test TempDir cleanup) after Scan
+		// returns. Every return below pushes its EOF first.
 		if f != nil {
 			f.Close()
-			f = nil
+		}
+	}()
+	var currentOffset int64
+	overlap := scanOverlap()
+	tail := make([]byte, overlap)
+	var haveTail bool
+	var blocksSinceCheckpoint int
+	strict := isRoot && opts.strictRoot
+	// Every target yields exactly one EOF unless canceled; the
+	// stages' publish/consume balance depends on it.
+	pushEOF := func() bool {
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- EOF:
+			return true
+		}
+	}
+
+	opts.logf("[scan] Starting new target: %s\n", target.Describe())
+	totalBytes, err := target.Size()
+	if err != nil {
+		if !strict {
+			opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+			return outcome, pushEOF()
+		}
+		// The size feeds only the progress total and the
+		// coverage check: a strict root with an unreadable
+		// size (empty file, device node) still gets its
+		// Open attempt below, with an unknown total like
+		// nested gzip members. No warning here: Open and
+		// the read loop report real failures themselves,
+		// and an unsized-but-readable root is a success.
+		totalBytes = -1
+	}
+	if strict {
+		outcome.expected = totalBytes - target.StartOffset()
+	}
+
+	if f, err = target.Open(); err != nil {
+		opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+		if strict {
+			outcome.rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+		}
+		return outcome, pushEOF()
+	}
+	outcome.opened = true
+
+	if _, err = f.Seek(target.StartOffset(), 0); err != nil {
+		opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+		if strict {
+			outcome.rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+		}
+		return outcome, pushEOF()
+	}
+
+	currentOffset = target.StartOffset()
+	haveTail = false
+readLoop:
+	for {
+		var block *Block
+		select {
+		case <-ctx.Done():
+			return outcome, false
+		case block = <-emptyBlocks:
+		}
+
+		prefix := 0
+		if haveTail {
+			copy(block.data, tail)
+			prefix = overlap
+		}
+		read, err := io.ReadFull(f, block.data[prefix:prefix+blockSize])
+		if read == 0 && isCleanEnd(err) {
+			// Normal end of target; the block is unused.
+			emptyBlocks <- block
+			break readLoop
+		}
+		if read == 0 {
+			// Hard read error with no bytes. On seekable targets the
+			// range is retried, then skipped so the rest of the target
+			// is still scanned; a skipped gap breaks overlap continuity.
+			var seekable bool
+			read, err, seekable = retryBlockRead(f, block.data[prefix:prefix+blockSize], currentOffset)
+			if read == 0 && isCleanEnd(err) {
+				emptyBlocks <- block
+				break readLoop
+			}
+			if read == 0 && !seekable {
+				opts.logf("[scan] Unable to scan target: %s\n", err.Error())
+				if strict && outcome.rootErr == nil {
+					outcome.rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), err)
+				}
+				emptyBlocks <- block
+				break readLoop
+			}
+			if read == 0 {
+				reportBadSector(target, currentOffset, currentOffset+blockSize, err, opts.OnBadSector, opts.logWriter())
+				currentOffset += blockSize
+				haveTail = false
+				emptyBlocks <- block
+				// Position is indeterminate after failed reads.
+				if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
+					opts.logf("[scan] Unable to scan target: %s\n", serr.Error())
+					if strict && outcome.rootErr == nil {
+						outcome.rootErr = fmt.Errorf("cannot scan %s: %w", target.Describe(), serr)
+					}
+					break readLoop
+				}
+				continue
+			}
+		}
+		if strict {
+			outcome.covered += int64(read)
+		}
+		// A partial read with an error still yields a valid block: the
+		// bytes already returned are real target data. This matters for
+		// nested gzip streams followed by trailing garbage, where the
+		// reader reports the end of the stream as a format error instead
+		// of a clean EOF.
+
+		// The block carries the overlap prefix plus the newly read bytes.
+		// block.offset pins the absolute offset of data[0] so archive
+		// scanners derive exact nested offsets; the reported location
+		// stays on the logical block start to keep offsets stable.
+		block.length = prefix + read
+		block.overlap = prefix
+		block.offset = currentOffset - int64(prefix)
+		if opts.caseRec != nil && isRoot {
+			// Only the newly read bytes: the overlap prefix was
+			// hashed with the previous block, skipped ranges never.
+			opts.caseRec.hash(block.data[prefix : prefix+read])
+		}
+		if jc != nil && jc.digest != nil && isRoot {
+			// Manifest digest over the same covered bytes.
+			jc.digest.write(block.data[prefix : prefix+read])
+		}
+		block.final = isCleanEnd(err)
+		block.location = fmt.Sprintf("%s in %dkB block at byte offset %d", target.Describe(), blockSize/1024, currentOffset)
+		block.source = target
+
+		if block.length >= overlap {
+			copy(tail, block.data[block.length-overlap:block.length])
+		}
+		haveTail = true
+		currentOffset += int64(read)
+		scanned := currentOffset
+		if totalBytes > 0 && scanned > totalBytes {
+			scanned = totalBytes // skips may step past the end
+		}
+		onProgress(ProgressInfo{
+			CurrentTarget:    target.Describe(),
+			ScannedBytes:     scanned,
+			TotalBytes:       totalBytes,
+			UnscannedTargets: len(targets)})
+
+		abort := false
+		if err != nil && !isCleanEnd(err) {
+			// Good bytes above, but the stream position is
+			// indeterminate: reposition so the next read retries the
+			// failed region. Non-seekable targets end here instead.
+			if _, serr := f.Seek(currentOffset, io.SeekStart); serr != nil {
+				abort = true
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return
-		case out <- EOF:
+			return outcome, false
+		case out <- block:
 		}
+
+		if isRoot && jc != nil {
+			blocksSinceCheckpoint++
+			if blocksSinceCheckpoint >= checkpointBlockInterval {
+				blocksSinceCheckpoint = 0
+				// Mid-root drain, after the block is pushed:
+				// the frontier counts this block's bytes, so
+				// it must travel downstream before the drain
+				// proves it delivered. Draining first would
+				// journal bytes still in hand — a kill in
+				// that window would strand them past the
+				// rewind. Barriers fire only here, where the
+				// root EOF is provably unpushed, so
+				// detectWallets is provably alive and the ack
+				// cannot strand.
+				if !drainFrontier(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, target, currentOffset) {
+					return outcome, false
+				}
+			}
+		}
+		if block.final || abort {
+			break readLoop
+		}
+	}
+	outcome.end = currentOffset
+	return outcome, pushEOF()
+}
+
+// drainFrontier proves a mid-root journal point: it consumes the
+// whole nested backlog through plain nested reads, then
+// barrier-rounds until a quiet observation, then journals. The
+// caller's root read state rests in its own frame, so the stack
+// is the save/restore; nested reads never drain, so drains never
+// nest. Barriers fire only here, where the root EOF is provably
+// unpushed, so detectWallets is provably alive and the ack cannot
+// strand; EOF balance (each published target read exactly once
+// with exactly one EOF) keeps nested EOFs consumed upstream no
+// matter the interleave. The publication gate caps outstanding
+// targets below channel capacity, so an admitted send never
+// blocks — even a million-member archive in flight degrades to
+// counted skips instead of wedging the barrier behind a stuck
+// publisher — and the ack always arrives. Each round strictly
+// shrinks undiscovered work, so the drain terminates; on cancel
+// it reports false.
+func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks chan *Block, out chan *Block,
+	onProgress func(ProgressInfo), opts Options, jc *journalCtl, gate *pubGate, root scanTarget, offset int64) bool {
+	for {
+		drained := false
+		for !drained {
+			select {
+			case <-ctx.Done():
+				return false
+			case nested := <-targets:
+				gate.consumed()
+				if _, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, nested, false); !alive {
+					return false
+				}
+			default:
+				drained = true
+			}
+		}
+		ack := make(chan struct{}, 1)
+		select {
+		case <-ctx.Done():
+			return false
+		case out <- &Block{barrier: ack}:
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ack:
+		}
+		if !jc.quiet() {
+			continue
+		}
+		if gate.skippedCount() == 0 {
+			writeFrontier(opts, frontierFor(opts, root, offset))
+		}
+		// A skip counted by now poisons this frontier: some
+		// nested work from already-read root bytes was
+		// dropped, and journaling past it would let a resume
+		// skip those bytes forever. Freeze the journal at its
+		// last skip-free proven point instead — earlier
+		// points stand, because the barrier ack proves every
+		// pre-barrier block fully processed, so a skip
+		// counted later concerns only later bytes. The EOF
+		// error above forces a retry from the frozen point,
+		// which re-covers the omitted bytes.
+		return true
 	}
 }
 
@@ -1042,6 +1429,13 @@ func detectWallets(ctx context.Context, in chan *Block, out chan *Block, onDetec
 		if block == EOF {
 			onComplete()
 			return
+		}
+		if block.barrier != nil {
+			// Drain barrier: every block ahead of it is
+			// delivered (FIFO chain), so acknowledge. Not
+			// a completion: no onComplete, no recycle.
+			block.barrier <- struct{}{}
+			continue
 		}
 		data := block.data[:block.length]
 		for _, needle := range needles {

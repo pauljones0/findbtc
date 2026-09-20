@@ -327,3 +327,96 @@ func TestScanFSVolumesMultiVolumeCheckpointRefused(t *testing.T) {
 		t.Errorf("refusal must name the problem: %v", err)
 	}
 }
+
+// A batch journal round-trips through the real atomic writer:
+// ordered entries with states and identity plus bound run
+// options all survive.
+func TestBatchJournalRoundTrip(t *testing.T) {
+	ckpt := filepath.Join(t.TempDir(), "batch.json")
+	want := Checkpoint{
+		Path:   "a.img",
+		Offset: 0,
+		Targets: []BatchTarget{
+			{Path: "a.img", Size: 100, Mtime: 7, State: BatchComplete},
+			{Path: "b.img", Size: 200, Mtime: 8, State: BatchActive, Offset: 1048576},
+			{Path: "gone.img", Size: -1, Mtime: 0, State: BatchPending},
+		},
+		Run: &BatchRun{Profile: "", CarveDir: "carve", Context: 1 << 20, JSON: true, CaseLog: "case.jsonl"},
+	}
+	var log bytes.Buffer
+	WriteBatchJournal(&log, ckpt, want)
+	if log.Len() != 0 {
+		t.Fatalf("journal write warned: %s", log.String())
+	}
+	got, err := ReadCheckpoint(ckpt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsBatch() {
+		t.Fatal("round-tripped journal lost its batch mark")
+	}
+	rawWant, _ := json.Marshal(want.Targets)
+	rawGot, _ := json.Marshal(got.Targets)
+	if string(rawWant) != string(rawGot) {
+		t.Errorf("targets %s, want %s", rawGot, rawWant)
+	}
+	rawWant, _ = json.Marshal(want.Run)
+	rawGot, _ = json.Marshal(got.Run)
+	if string(rawWant) != string(rawGot) {
+		t.Errorf("run %s, want %s", rawGot, rawWant)
+	}
+	if got.Updated.IsZero() {
+		t.Error("writer must stamp Updated")
+	}
+}
+
+// Corrupt batch journals refuse loudly, each naming its defect;
+// legacy journals without targets keep loading.
+func TestBatchJournalValidation(t *testing.T) {
+	good := Checkpoint{
+		Path:    "a.img",
+		Targets: []BatchTarget{{Path: "a.img", Size: 1, State: BatchPending}},
+		Run:     &BatchRun{},
+	}
+	cases := map[string]func(*Checkpoint){
+		"unknown state": func(c *Checkpoint) { c.Targets[0].State = "done-ish" },
+		"two active": func(c *Checkpoint) {
+			c.Targets = append(c.Targets, BatchTarget{Path: "b", State: BatchActive})
+			c.Targets[0].State = BatchActive
+		},
+		"empty path":          func(c *Checkpoint) { c.Targets[0].Path = "" },
+		"malformed digest":    func(c *Checkpoint) { c.Targets[0].SHA256 = "not-hex" },
+		"negative offset":     func(c *Checkpoint) { c.Targets[0].Offset = -5 },
+		"impossible size":     func(c *Checkpoint) { c.Targets[0].Size = -2 },
+		"negative mtime":      func(c *Checkpoint) { c.Targets[0].Mtime = -1 },
+		"targets without run": func(c *Checkpoint) { c.Run = nil },
+	}
+	for name, mutate := range cases {
+		cp := good
+		cp.Targets = append([]BatchTarget(nil), good.Targets...)
+		mutate(&cp)
+		raw, _ := json.Marshal(cp)
+		path := filepath.Join(t.TempDir(), "bad.json")
+		if err := os.WriteFile(path, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ReadCheckpoint(path); err == nil {
+			t.Errorf("%s: corrupt journal loaded clean", name)
+		} else if !strings.Contains(err.Error(), "bad checkpoint") {
+			t.Errorf("%s: error %v must name the journal", name, err)
+		}
+	}
+	legacy := Checkpoint{Path: "a.img", Offset: 10}
+	raw, _ := json.Marshal(legacy)
+	path := filepath.Join(t.TempDir(), "legacy.json")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadCheckpoint(path)
+	if err != nil {
+		t.Fatalf("legacy journal must load: %v", err)
+	}
+	if got.IsBatch() {
+		t.Error("legacy journal must not read as batch")
+	}
+}

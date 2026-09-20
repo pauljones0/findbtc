@@ -1082,7 +1082,10 @@ func TestTokenlistForeignJSONVerbatim(t *testing.T) {
 }
 
 // Resuming prints the resume position, not just the byte offset: the
-// owner sees where in the target the scan continues.
+// owner sees where in the target the scan continues. The announcement
+// names the rewound grid point actually scanned, not the raw journal
+// point: offset 41 minus the 2048-byte overlap clamps to 0, so this
+// tiny fixture announces byte offset 0 (continuing at 0%).
 func TestResumePrintsPosition(t *testing.T) {
 	dir := t.TempDir()
 	target := writeGateFile(t, dir, "target.bin", strings.Repeat("x", 100))
@@ -1092,7 +1095,7 @@ func TestResumePrintsPosition(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("resume exit %d (stderr: %s)", exit, firstLine(stderr))
 	}
-	if !strings.Contains(stderr, "at byte offset 41 (continuing at 41%)") {
+	if !strings.Contains(stderr, "at byte offset 0 (continuing at 0%)") {
 		t.Errorf("resume must print byte offset and percent, stderr:\n%s", stderr)
 	}
 }
@@ -1531,6 +1534,8 @@ func TestTargetsFile(t *testing.T) {
 // Single-target-only inputs refuse loudly in a multi-target run:
 // stdin cannot be consumed twice, one -s cannot offset N targets,
 // and a checkpoint journals one target.
+// Multi-target checkpointing journals a per-target batch manifest
+// (Goal 42); only the unallocated range journals stay refused.
 func TestMultiTargetRefusals(t *testing.T) {
 	dir := t.TempDir()
 	a := writeGateFile(t, dir, "a.bin", "nothing here")
@@ -1542,8 +1547,8 @@ func TestMultiTargetRefusals(t *testing.T) {
 	}{
 		{"stdin-mix", []string{"-", a}, "scanned alone"},
 		{"start-offset", []string{"-s", "10", a, b}, "-s offsets one target"},
-		{"checkpoint", []string{"-checkpoint", filepath.Join(dir, "c.json"), a, b}, "journal one target"},
-		{"resume", []string{"-checkpoint", filepath.Join(dir, "c.json"), "-resume", a, b}, "journal one target"},
+		{"checkpoint-unallocated", []string{"-unallocated-only", "-checkpoint", filepath.Join(dir, "c.json"), a, b}, "not supported with -unallocated-only"},
+		{"resume-unallocated", []string{"-unallocated-only", "-checkpoint", filepath.Join(dir, "c.json"), "-resume", a, b}, "not supported with -unallocated-only"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, stderr, exit := runTestBinary(t, tc.args...)

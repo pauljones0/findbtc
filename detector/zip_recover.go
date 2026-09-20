@@ -125,7 +125,7 @@ func headerBytes(source scanTarget, data []byte, abs, dataAbs, dataLen int64, n 
 
 // flushZipCandidates publishes pending local-header entries not already
 // covered by an intact archive, and reports how many were published.
-func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTargets chan scanTarget, log io.Writer) int {
+func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTargets chan scanTarget, log io.Writer, gate *pubGate) int {
 	n := 0
 	for _, c := range *pending {
 		if c.source.Depth()+1 > maxArchiveDepth {
@@ -142,16 +142,18 @@ func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTarg
 		if covered {
 			continue
 		}
-		n++
-		*published = append(*published, zipRange{c.source, c.dataOff, c.dataOff + c.compSize})
-		scanTargets <- &zipEntryTarget{
+		if !gatePublish(gate, scanTargets, &zipEntryTarget{
 			source:     c.source,
 			name:       c.name,
 			dataOff:    c.dataOff,
 			compSize:   c.compSize,
 			uncompSize: c.uncompSize,
 			method:     c.method,
+		}) {
+			continue
 		}
+		n++
+		*published = append(*published, zipRange{c.source, c.dataOff, c.dataOff + c.compSize})
 	}
 	return n
 }

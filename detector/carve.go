@@ -43,10 +43,71 @@ type carveConfig struct {
 	seqStart     int
 }
 
+// carveTempPrefix marks atomic-write staging files in carve
+// directories. Staging names never match hit-NNNNNN.*, so carve
+// numbering scans ignore them; CleanCarveTemps reaps them.
+const carveTempPrefix = ".findbtc-tmp-"
+
+// commitTempFile publishes a staged file at its final name: the
+// old file (if any) is removed first so the rename works on
+// Windows too. A kill can leave the old file, a missing file,
+// or the new file — never torn bytes.
+func commitTempFile(tmp *os.File, final string) error {
+	name := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	os.Remove(final)
+	if err := os.Rename(name, final); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to dir/name via staging plus
+// commit, so a kill never leaves torn bytes behind.
+func writeFileAtomic(dir, name string, data []byte) error {
+	tmp, err := os.CreateTemp(dir, carveTempPrefix+"*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	return commitTempFile(tmp, filepath.Join(dir, name))
+}
+
+// CleanCarveTemps removes staged atomic-write files left by
+// killed runs. Best-effort: it reports how many it reaped and
+// never fails the caller.
+func CleanCarveTemps(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	reaped := 0
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), carveTempPrefix) || e.IsDir() {
+			continue
+		}
+		if os.Remove(filepath.Join(dir, e.Name())) == nil {
+			reaped++
+		}
+	}
+	return reaped
+}
+
 // carveDetection writes the bytes surrounding a hit to dir as hit-NNNNNN.bin
 // plus a JSON sidecar, and records the file on d. Carving is best-effort: a
 // failure is returned but the caller still reports the detection. Bytes are
-// streamed so large contexts never sit fully in memory.
+// streamed so large contexts never sit fully in memory. Every output
+// commits atomically (staging plus rename), so a killed run leaves
+// complete carves, missing carves, or at most one pair missing
+// its sidecar — never torn bytes a resume would inherit.
 func carveDetection(source scanTarget, d *Detection, dir string, contextBytes int64, seq int, log io.Writer) error {
 	if contextBytes < 0 {
 		contextBytes = 0
@@ -64,22 +125,22 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 	defer r.Close()
 
 	binPath := filepath.Join(dir, fmt.Sprintf("hit-%06d.bin", seq))
-	out, err := os.Create(binPath)
+	out, err := os.CreateTemp(dir, carveTempPrefix+"*")
 	if err != nil {
 		return err
 	}
 	written, copyErr := io.CopyN(out, r, size)
-	closeErr := out.Close()
-	if closeErr != nil {
-		os.Remove(binPath)
-		return closeErr
-	}
-	if written == 0 && copyErr != nil && copyErr != io.EOF && copyErr != io.ErrUnexpectedEOF {
-		os.Remove(binPath)
+	if copyErr != nil && copyErr != io.EOF && copyErr != io.ErrUnexpectedEOF && written == 0 {
+		out.Close()
+		os.Remove(out.Name())
 		return copyErr
 	}
-	// Partial carves (target ended, or a nested stream error after N good
-	// bytes) still hold real target data, so they are kept.
+	// Partial carves (target ended, or a nested stream error
+	// after N good bytes) still hold real target data, so they
+	// are kept.
+	if err := commitTempFile(out, binPath); err != nil {
+		return err
+	}
 
 	d.CarvePath = binPath
 
@@ -102,7 +163,7 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(sidecarPathFor(binPath), append(sidecar, '\n'), 0644)
+	return writeFileAtomic(dir, strings.TrimSuffix(filepath.Base(binPath), ".bin")+".json", append(sidecar, '\n'))
 }
 
 // sidecarPathFor names the JSON sidecar for a carve file. Patch
@@ -265,8 +326,9 @@ func carveSalvage(binPath string, baseAbs int64, dir string, seq int, log io.Wri
 	if r == nil {
 		return nil
 	}
-	salvPath := filepath.Join(dir, fmt.Sprintf("hit-%06d.salvage.db", seq))
-	if err := os.WriteFile(salvPath, r.Image, 0644); err != nil {
+	salvName := fmt.Sprintf("hit-%06d.salvage.db", seq)
+	salvPath := filepath.Join(dir, salvName)
+	if err := writeFileAtomic(dir, salvName, r.Image); err != nil {
 		logLinef(log, "[carve] warning: could not write salvage %s: %s\n", salvPath, err.Error())
 		return nil
 	}

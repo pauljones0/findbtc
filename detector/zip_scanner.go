@@ -118,7 +118,7 @@ func (c *closableBytesReader) Close() error {
 	return nil
 }
 
-func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer) {
+func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan scanTarget, log io.Writer, gate *pubGate) {
 	openedFiles := 0
 	// Local-header candidates are speculative: they flush at each target's
 	// end-of-stream, when intact archives have already claimed their bytes,
@@ -134,8 +134,20 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 		case block = <-in:
 		}
 
+		if block.barrier != nil {
+			// Drain barrier: forward untouched. Not a target
+			// boundary, so pending candidates and EOF
+			// accounting stay exactly as they are.
+			select {
+			case <-ctx.Done():
+				return
+			case out <- block:
+			}
+			continue
+		}
+
 		if block == EOF {
-			openedFiles += flushZipCandidates(&pending, &published, scanTargets, log)
+			openedFiles += flushZipCandidates(&pending, &published, scanTargets, log, gate)
 			pending = nil
 			if openedFiles > 0 {
 				openedFiles -= 1
@@ -160,7 +172,7 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 			// Occurrences fully inside the overlap prefix were already
 			// handled with the previous block.
 			if abs+len(ZIP_ECD_HEADER) > block.overlap {
-				openedFiles += scanZipFile(block.source, block.offset+int64(abs), scanTargets, &published, log)
+				openedFiles += scanZipFile(block.source, block.offset+int64(abs), scanTargets, &published, log, gate)
 			}
 			i = abs + 1
 		}
@@ -188,7 +200,7 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 	}
 }
 
-func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTargets chan scanTarget, published *[]zipRange, log io.Writer) int {
+func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTargets chan scanTarget, published *[]zipRange, log io.Writer, gate *pubGate) int {
 	if source.Depth()+1 > maxArchiveDepth {
 		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
 		return 0
@@ -225,13 +237,14 @@ func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTarge
 				fileInfo.UncompressedSize64, fileInfo.Name, maxZipMemberBytes)
 			continue
 		}
-		newScanTargets += 1
-		scanTargets <- &zipScanTarget{
+		if gatePublish(gate, scanTargets, &zipScanTarget{
 			source:               source,
 			zipOffset:            offset,
 			fileIndex:            fileIndex,
 			zipSize:              size,
 			uncompressedFileSize: int64(fileInfo.UncompressedSize64),
+		}) {
+			newScanTargets++
 		}
 	}
 
