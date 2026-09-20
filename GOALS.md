@@ -59,7 +59,8 @@ completely solve the pain point?"**
 | 38 | Multi-target scans + unified report | complete | 3b67a44 |
 | 39 | Completions + man page | complete | 15d7167 |
 | 40 | Green CI matrix: Windows + password handoff | complete | a0d05ca |
-| 41 | Owner recovery rehearsal end-to-end | active | - |
+| 41 | Owner recovery rehearsal end-to-end | complete | e729314 |
+| 42 | Resumable multi-target recovery | active | - |
 
 ## Global done criteria (every goal)
 
@@ -1364,18 +1365,31 @@ scanned, what remains, and what to do next — without exposing
 fixture secrets or mutating source images.
 
 **Completely solved when:**
-- [ ] Existing end-to-end coverage is inventoried; the rehearsal
+- [x] Existing end-to-end coverage is inventoried; the rehearsal
       reuses it instead of inventing a redundant framework.
-- [ ] A bounded acceptance matrix covers: ordinary + hostile-but-
+- [x] A bounded acceptance matrix covers: ordinary + hostile-but-
       valid filenames, drive-root/UNC/extended-root semantics
       where supported, one incomplete/unreadable target, one
       benign decoy, one synthetic encrypted-wallet fixture.
-- [ ] The rehearsal asserts: source images byte-unchanged, no
+- [x] The rehearsal asserts: source images byte-unchanged, no
       fixture secret in default stdout/report, exact target bytes
       reach native CLI argv, and coverage/status/help tell a
       non-expert what was scanned and what remains.
-- [ ] The README block executes verbatim against the frozen CLI,
+- [x] The README block executes verbatim against the frozen CLI,
       offline by default, after adversarial review of the matrix.
+
+**Done:** owner-rehearsal.sh + gen-rehearsal-media.py + README
+block + wiring test + CI job, all green: CI 35519947895 @e729314
+all 9 jobs SUCCESS (matrix, gates, handoff, rehearsal log shows
+verbatim block, byte-exact hostile targets, clean decoy,
+NOT SCANNED locked/missing, no-leak with carve controls,
+unchanged media, REHEARSAL PASSED). Rehearsal exposed and fixed
+a product gap: zero-byte error case-log records no longer carry
+fake empty digests (regression test). Windows root/extended-path
+test added; UNC explicitly out (no offline fixture). Queued
+local gate retired unrun as superseded by the same-source
+remote gates; no local PASS claimed beyond the watched
+rehearsal + focused suites.
 
 **Execute:**
 1. Inventory existing e2e coverage; select the highest-value
@@ -1387,6 +1401,40 @@ fixture secrets or mutating source images.
 lookups; paid calls; destructive disk access; new platforms.
 
 **Verify:** rehearsal script/log; gates.
+
+## Goal 42 — Resumable multi-target recovery
+
+**Pain to completely solve:** batch mode refuses
+checkpoint/resume while single-target resume exists, so an
+interrupted long batch forces the owner back to loops and
+re-scanning completed media.
+
+**Completely solved when:**
+- [ ] A conservative checkpoint/target-manifest contract is
+      designed and adversarially reviewed BEFORE implementation.
+- [ ] A long supported batch can be interrupted and resumed
+      without silently losing coverage, repeating reported
+      hits/carves/case-log claims, or treating changed/missing/
+      reordered inputs as already scanned.
+- [ ] Fixture evidence interrupts after completed work AND midway
+      through a later target, then compares resumed results and
+      coverage to an uninterrupted cold run; changed/truncated/
+      missing/checkpoint-corrupt cases plus an output/checkpoint
+      boundary fault are covered.
+- [ ] Ordinary read-only scanning, default secret privacy, and
+      clear partial/failure exits are preserved; unsupported
+      modes are explicit and bounded (refusal documents the
+      boundary, never substitutes for the supported outcome).
+
+**Execute:**
+1. Inspect current checkpoint/batch code and coverage.
+2. Contract + acceptance matrix + adversarial review.
+3. Implement; fixture evidence vs cold runs; gates.
+
+**Non-goals:** exact-once durability claims beyond proof;
+all-races crash consistency; real wallets; destructive access.
+
+**Verify:** resume-vs-cold equivalence fixtures; gates.
 
 ## Commit policy
 
