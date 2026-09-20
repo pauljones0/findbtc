@@ -1,0 +1,10 @@
+# Winget manifests for findbtc 0.2.0 (bootstrap; URLs + SHA-256 verified
+# against the release checksums.txt). Prepared for manual submission to
+# microsoft/winget-pkgs — that external PR stays pending per Goal 37, so
+# these install today only via `winget install --manifest <this dir>`.
+# Layout mirrors the community repo: manifests/p/pauljones0/findbtc/0.2.0/.
+PackageIdentifier: pauljones0.findbtc
+PackageVersion: 0.2.0
+DefaultLocale: en-US
+ManifestType: version
+ManifestVersion: 1.6.0

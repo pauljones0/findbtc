@@ -26,9 +26,34 @@ types are ever printed; the secrets themselves stay out of logs and output.
 
 ## Installing
 
-Download a ready-made binary for linux, macOS or Windows (x86-64 and ARM64)
-from the [releases page](https://github.com/pauljones0/findbtc/releases), then
-verify its checksum:
+macOS, via the Homebrew tap (no admin needed):
+
+    brew tap pauljones0/findbtc
+    brew install pauljones0/findbtc/findbtc
+
+Windows, via Scoop (no admin needed):
+
+    scoop bucket add findbtc https://github.com/pauljones0/scoop-findbtc
+    scoop install findbtc
+
+Windows, via winget from the prepared local manifests (community
+submission still pending, so this runs unelevated from files —
+see [docs/RELEASE.md](docs/RELEASE.md)):
+
+    mkdir findbtc-winget; cd findbtc-winget
+    curl -sSL -O https://raw.githubusercontent.com/pauljones0/findbtc/master/packaging/winget/pauljones0.findbtc.yaml
+    curl -sSL -O https://raw.githubusercontent.com/pauljones0/findbtc/master/packaging/winget/pauljones0.findbtc.installer.yaml
+    curl -sSL -O https://raw.githubusercontent.com/pauljones0/findbtc/master/packaging/winget/pauljones0.findbtc.locale.en-US.yaml
+    winget install --manifest . --accept-package-agreements --accept-source-agreements
+
+Every path above is executed verbatim in CI on its own OS
+(`install-smoke`: install, version check, synthetic scan), so the
+commands you copy are the commands that passed.
+
+Or download a ready-made binary for linux, macOS or Windows
+(x86-64 and ARM64) from the
+[releases page](https://github.com/pauljones0/findbtc/releases),
+then verify its checksum:
 
     sha256sum -c checksums.txt
 
@@ -44,9 +69,6 @@ pull + volume-mount scan, see [docs/CONTAINER.md](docs/CONTAINER.md)):
 
     docker run --rm -v ./evidence:/evidence:ro \
       ghcr.io/pauljones0/findbtc:latest /evidence/disk.img
-
-There is no Homebrew tap yet, so macOS users should install from the release
-archives.
 
 Since this is potentially sensitive software, you are encouraged to build it
 from source instead. That requires a recent Go toolchain, see

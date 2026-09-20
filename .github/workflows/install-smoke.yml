@@ -1,0 +1,105 @@
+name: install-smoke
+
+# Every documented install path, executed for real on its own OS:
+# Homebrew tap (macOS), Scoop bucket (Windows), winget manifests
+# (Windows, local --manifest install until the community PR lands),
+# plus pin/config drift checks on Ubuntu.
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 5 * * 1'
+
+jobs:
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: packaging pins match release checksums
+        run: sh scripts/verify-packaging-pins.sh
+      - name: goreleaser config valid
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: check
+
+  brew-smoke:
+    runs-on: macos-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: install from tap
+        run: |
+          brew tap pauljones0/findbtc
+          brew install pauljones0/findbtc/findbtc
+      - name: version matches latest release
+        run: |
+          tag="$(gh release view --json tagName -q .tagName -R pauljones0/findbtc)"
+          findbtc -version | grep -q "${tag#v}"
+      - name: synthetic scan
+        run: |
+          printf 'x wallet.dat y' > /tmp/fbt-smoke.bin
+          findbtc -json /tmp/fbt-smoke.bin > /tmp/fbt-smoke.jsonl 2> /tmp/fbt-smoke.err
+          grep -q wallet.dat /tmp/fbt-smoke.jsonl
+          grep -q '\[COMPLETE\]' /tmp/fbt-smoke.err
+
+  scoop-smoke:
+    runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: install scoop
+        shell: pwsh
+        run: |
+          Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+          irm get.scoop.sh | iex
+      - name: install from bucket
+        shell: pwsh
+        run: |
+          scoop bucket add findbtc https://github.com/pauljones0/scoop-findbtc
+          scoop install findbtc
+      - name: version matches latest release
+        shell: pwsh
+        run: |
+          $tag = (gh release view --json tagName -q .tagName -R pauljones0/findbtc).Trim()
+          (& scoop which findbtc) | Out-Null
+          $out = & (scoop which findbtc) -version
+          if ($out -notmatch $tag.TrimStart('v')) { throw "version '$out' lacks $tag" }
+      - name: synthetic scan
+        shell: pwsh
+        run: |
+          $exe = scoop which findbtc
+          $smoke = Join-Path $env:TEMP 'fbt-smoke.bin'
+          Set-Content -NoNewline -Path $smoke -Value 'x wallet.dat y'
+          & $exe -json $smoke 2> $env:TEMP\fbt-smoke.err | Out-File $env:TEMP\fbt-smoke.jsonl
+          if ((Get-Content $env:TEMP\fbt-smoke.jsonl -Raw) -notmatch 'wallet.dat') { throw 'no hit' }
+          if ((Get-Content $env:TEMP\fbt-smoke.err -Raw) -notmatch '\[COMPLETE\]') { throw 'no COMPLETE' }
+
+  winget-smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: validate manifests
+        shell: pwsh
+        run: winget validate --manifest packaging/winget
+      - name: install from local manifests
+        shell: pwsh
+        run: winget install --manifest packaging/winget --accept-package-agreements --accept-source-agreements
+      - name: version and synthetic scan
+        shell: pwsh
+        run: |
+          winget list --id pauljones0.findbtc | Out-Null
+          $exe = (Get-Command findbtc -ErrorAction SilentlyContinue)?.Source
+          if (-not $exe) {
+            $exe = Get-ChildItem $env:LOCALAPPDATA\Microsoft\WinGet\Packages -Recurse -Filter findbtc.exe |
+              Select-Object -First 1 -ExpandProperty FullName
+          }
+          if (-not $exe) { throw 'findbtc not on PATH nor under WinGet Packages' }
+          & $exe -version
+          $smoke = Join-Path $env:TEMP 'fbt-smoke.bin'
+          Set-Content -NoNewline -Path $smoke -Value 'x wallet.dat y'
+          & $exe -json $smoke 2> $env:TEMP\fbt-wsmoke.err | Out-File $env:TEMP\fbt-wsmoke.jsonl
+          if ((Get-Content $env:TEMP\fbt-wsmoke.jsonl -Raw) -notmatch 'wallet.dat') { throw 'no hit' }
+          if ((Get-Content $env:TEMP\fbt-wsmoke.err -Raw) -notmatch '\[COMPLETE\]') { throw 'no COMPLETE' }

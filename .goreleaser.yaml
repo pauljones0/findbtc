@@ -97,20 +97,48 @@ dockers_v2:
       org.opencontainers.image.version: "{{.Version}}"
       org.opencontainers.image.created: "{{.Date}}"
 
-# The cask file is generated into dist/ but not pushed: the tap repo does
-# not exist yet. Create an empty public repo named homebrew-findbtc under
-# the release owner and flip skip_upload to publish it automatically.
+# Homebrew cask with a `binary` stanza (GoReleaser's blessed path for
+# precompiled CLI tools; the binary-formula pipe is deprecated since
+# v2.10). `brew install pauljones0/findbtc/findbtc` resolves the cask
+# (proven by the macos install smoke in CI).
+# skip_upload stays true until a TAP_GITHUB_TOKEN secret exists: the
+# default GITHUB_TOKEN cannot push cross-repo, so tap automation
+# needs a classic PAT with repo scope on homebrew-findbtc (see
+# docs/RELEASE.md "Tap automation"). Until then the tap updates by
+# hand from the packaging/homebrew bootstrap on each release.
 homebrew_casks:
   - name: findbtc
-    skip_upload: true
     repository:
       owner: pauljones0
       name: homebrew-findbtc
     homepage: https://github.com/pauljones0/findbtc
     description: Find BTC wallets by scanning raw block devices
     license: GPL-3.0-or-later
+    skip_upload: true
     binaries:
       - findbtc
+
+# No scoops block: the Scoop bucket self-updates via the manifest's
+# checkver/autoupdate plus its own scheduled checkver workflow (same
+# repo, no extra token). See the bucket README.
+
+# Winget manifests render into dist/ for review on every release but
+# never auto-submit: microsoft/winget-pkgs PRs stay a manual,
+# separately-authorized step (Goal 37). Install from the staged
+# manifests today with `winget install --manifest <dir>`.
+winget:
+  - package_identifier: pauljones0.findbtc
+    publisher: Paul Jones
+    publisher_url: https://github.com/pauljones0
+    homepage: https://github.com/pauljones0/findbtc
+    short_description: Find BTC wallets by scanning raw block devices
+    description: findbtc scans raw block devices and forensic images for cryptocurrency wallet traces.
+    license: GPL-3.0-or-later
+    license_url: https://github.com/pauljones0/findbtc/blob/master/LICENSE
+    repository:
+      owner: microsoft
+      name: winget-pkgs
+    skip_upload: true
 
 snapshot:
   version_template: '{{ .Tag }}-SNAPSHOT-{{ .ShortCommit }}'

@@ -68,8 +68,38 @@ findbtc is GPL-3.0-or-later; `LICENSE` ships inside every archive.
 When you redistribute a release — to a lab machine, a case share,
 or a customer — include the archive, its `.sbom.json`, and
 `checksums.txt` together so the recipient can repeat the checks
-above. No Homebrew tap is published yet; macOS users should install
-from the release archives.
+above.
 
 Snapshot builds (version `*-SNAPSHOT-*`) are CI/dev artifacts, never
 published to releases; treat them as untrusted for casework.
+
+## Package-manager automation (maintainers)
+
+The Homebrew tap ([homebrew-findbtc](https://github.com/pauljones0/homebrew-findbtc))
+and Scoop bucket ([scoop-findbtc](https://github.com/pauljones0/scoop-findbtc))
+pin immutable release assets; the bootstrap copies live under
+`packaging/` and `scripts/verify-packaging-pins.sh` fails CI if any
+pin drifts from the release's `checksums.txt`.
+
+- Tap: GoReleaser's `homebrew_casks` block rewrites the cask per
+  release, but `skip_upload` stays true until cross-repo push
+  credentials exist — the default `GITHUB_TOKEN` cannot push to
+  the tap repo. Until then, update `Casks/findbtc.rb` by hand
+  from `packaging/homebrew` on each release. To automate:
+  create a classic PAT with `repo` scope on both `findbtc` and
+  `homebrew-findbtc`, store it as the `TAP_GITHUB_TOKEN` repo
+  secret, flip `skip_upload` to false, and point the release
+  workflow's GoReleaser `GITHUB_TOKEN` at that secret. (External
+  step; the PAT is a long-lived credential — rotate it
+  deliberately and never broaden its scopes.)
+- Bucket: self-updating. The manifest's `checkver`/`autoupdate`
+  stanzas plus the bucket's scheduled `checkver` workflow bump
+  `bucket/findbtc.json` after each release with no extra token;
+  just confirm the workflow stays green.
+- Winget: manifests under `packaging/winget` are prepared and
+  CI-validated (`winget validate` + local `--manifest` install
+  on Windows), but community submission stays a manual,
+  separately-authorized step: place them under
+  `manifests/p/pauljones0/findbtc/<version>/` in a
+  `microsoft/winget-pkgs` PR. Until that PR merges, users
+  install from the local files (see README).
