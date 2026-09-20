@@ -129,12 +129,20 @@ func TestPubGateCapZeroAdmitsNothing(t *testing.T) {
 	var log bytes.Buffer
 	var dets int
 	err := ScanWithOptions(0, path, Options{Log: &log},
-		func(Detection) { dets++ }, func(ProgressInfo) {})
+		func(d Detection) {
+			// Nested hits only: a raw root leak of the
+			// needle is Go-flate-version-dependent, but
+			// the cap-0 contract (nothing admitted) is
+			// about nested publications.
+			if d.Target != path {
+				dets++
+			}
+		}, func(ProgressInfo) {})
 	if err == nil || !strings.Contains(err.Error(), "incomplete coverage") {
 		t.Fatalf("cap-0 scan error = %v, want incomplete-coverage error\n%s", err, log.String())
 	}
 	if dets != 0 {
-		t.Errorf("cap-0 detections = %d, want 0 (every nested publish refused)", dets)
+		t.Errorf("cap-0 nested detections = %d, want 0 (every nested publish refused)", dets)
 	}
 }
 
@@ -181,12 +189,19 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Nested hits only (Target != path): raw root leaks of the
+	// needle are Go-flate-version-dependent, but the
+	// congested/baseline contract concerns nested members only.
 	scan := func(cap int64, start int64, cpPath, clPath string) (dets int, err error, log string) {
 		maxOutstandingPubs = cap
 		var lb bytes.Buffer
 		err = ScanWithOptions(start, path, Options{
 			Log: &lb, CheckpointPath: cpPath, CaseLogPath: clPath,
-		}, func(Detection) { dets++ }, func(ProgressInfo) {})
+		}, func(d Detection) {
+			if d.Target != path {
+				dets++
+			}
+		}, func(ProgressInfo) {})
 		return dets, err, lb.String()
 	}
 	lastCaseStatus := func(t *testing.T, clPath string) string {
@@ -249,7 +264,11 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 	var rd int
 	rerr := ScanWithOptions(cp.Offset, path, Options{
 		Log: &rlog, CheckpointPath: cpPath, CaseLogPath: filepath.Join(dir, "retry.log"),
-	}, func(Detection) { rd++ }, func(ProgressInfo) {})
+	}, func(d Detection) {
+		if d.Target != path {
+			rd++
+		}
+	}, func(ProgressInfo) {})
 	if rerr != nil {
 		t.Fatalf("retry scan: %v\n%s", rerr, rlog.String())
 	}

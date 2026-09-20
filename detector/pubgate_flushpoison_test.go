@@ -92,13 +92,22 @@ func TestPubGateFlushSkipRetryRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Nested hits only (Target != path): whether fixture bytes
+	// leak a literal needle into a raw stream depends on the Go
+	// flate encoder version, but the banking contract concerns
+	// nested members only. Filtering keeps counts exact on every
+	// toolchain.
 	scan := func(cap int64, start int64, cpPath, clPath string) (keys map[string]bool, err error, log string) {
 		maxOutstandingPubs = cap
 		keys = map[string]bool{}
 		var lb bytes.Buffer
 		err = ScanWithOptions(start, path, Options{
 			Log: &lb, CheckpointPath: cpPath, CaseLogPath: clPath,
-		}, func(d Detection) { keys[pubgateDetKey(d)] = true }, func(ProgressInfo) {})
+		}, func(d Detection) {
+			if d.Target != path {
+				keys[pubgateDetKey(d)] = true
+			}
+		}, func(ProgressInfo) {})
 		return keys, err, lb.String()
 	}
 
@@ -143,7 +152,11 @@ func TestPubGateFlushSkipRetryRecovers(t *testing.T) {
 	rkeys := map[string]bool{}
 	rerr := ScanWithOptions(cp.Offset, path, Options{
 		Log: &rlog, CheckpointPath: cpPath, CaseLogPath: filepath.Join(dir, "retry.log"),
-	}, func(d Detection) { rkeys[pubgateDetKey(d)] = true }, func(ProgressInfo) {})
+	}, func(d Detection) {
+		if d.Target != path {
+			rkeys[pubgateDetKey(d)] = true
+		}
+	}, func(ProgressInfo) {})
 	rlogs := readCaseLog(t, filepath.Join(dir, "retry.log"))
 	rstatus := ""
 	if len(rlogs) != 0 {

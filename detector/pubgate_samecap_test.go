@@ -57,11 +57,22 @@ func TestPubGateSameCapRetryCompletes(t *testing.T) {
 	// Baseline: uncongested, full coverage, clean completion.
 	maxOutstandingPubs = 100
 	var blog bytes.Buffer
+	// Nested hits only (Target != path): whether the tiny
+	// members' bytes leak a literal needle into the raw root
+	// stream depends on the Go flate encoder version (Go 1.24:
+	// none; Go 1.27: one at root offset 48), but the gate
+	// contract concerns nested publications only. Filtering
+	// keeps the absolute counts exact on every toolchain.
+	nested := func(d Detection) bool { return d.Target != path }
 	baseline := 0
 	berr := ScanWithOptions(0, path, Options{
 		Log: &blog, CheckpointPath: filepath.Join(dir, "base.cp"),
 		CaseLogPath: filepath.Join(dir, "base.log"),
-	}, func(Detection) { baseline++ }, func(ProgressInfo) {})
+	}, func(d Detection) {
+		if nested(d) {
+			baseline++
+		}
+	}, func(ProgressInfo) {})
 	if berr != nil {
 		t.Fatalf("baseline scan: %v\n%s", berr, blog.String())
 	}
@@ -89,6 +100,9 @@ func TestPubGateSameCapRetryCompletes(t *testing.T) {
 		lastErr = ScanWithOptions(start, path, Options{
 			Log: &lb, CheckpointPath: cpPath, CaseLogPath: clPath,
 		}, func(d Detection) {
+			if !nested(d) {
+				return
+			}
 			hits++
 			emitted++
 			seen[fmt.Sprintf("%s/%d/%s", d.Target, d.Offset, d.Needle)] = true

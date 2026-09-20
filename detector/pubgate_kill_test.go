@@ -10,6 +10,7 @@ package detector
 import (
 	"archive/zip"
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -61,6 +62,7 @@ func TestPubGateKillChild(t *testing.T) {
 	defer logf.Close()
 	maxOutstandingPubs = 3
 	dets := 0
+	nestedDets := 0
 	err = ScanWithOptions(0, path, Options{
 		Log: logf, CheckpointPath: ckpt, CaseLogPath: caseLog,
 	}, func(d Detection) {
@@ -69,20 +71,29 @@ func TestPubGateKillChild(t *testing.T) {
 		if ferr != nil {
 			return
 		}
-		_, _ = f.WriteString(d.Needle + "\n")
+		// Target-qualified: raw root leaks of the needle are
+		// Go-flate-version-dependent, so the parent counts
+		// nested lines only.
+		_, _ = f.WriteString(fmt.Sprintf("%s/%d/%s\n", d.Target, d.Offset, d.Needle))
 		_ = f.Sync()
 		_ = f.Close()
-		if dets == 1 {
-			// Liveness: the scan delivered a nested hit, so the
-			// root read (and its gate-tripping publish loop)
-			// finished. Park here so the parent's kill lands
-			// mid-drain; the budget only bounds a leaked child
-			// when the parent already failed, no timing
-			// depends on it.
-			if werr := os.WriteFile(signal, []byte("1"), 0644); werr != nil {
-				return
+		// Stall at the first NESTED hit (not merely the first
+		// hit): a raw root leak can arrive before the burst
+		// publishes, which would wedge the pipeline ahead of
+		// the trip. A nested hit proves a member was
+		// admitted and read, so the root read — and its
+		// gate-tripping publish loop — finished. Park here
+		// so the parent's kill lands mid-drain; the budget
+		// only bounds a leaked child when the parent
+		// already failed, no timing depends on it.
+		if d.Target != path {
+			nestedDets++
+			if nestedDets == 1 {
+				if werr := os.WriteFile(signal, []byte("1"), 0644); werr != nil {
+					return
+				}
+				time.Sleep(2 * time.Minute)
 			}
-			time.Sleep(2 * time.Minute)
 		}
 	}, func(ProgressInfo) {})
 	// Reached only if the park expires without a kill (parent
@@ -193,14 +204,23 @@ func TestPubGateCrashResumeCongested(t *testing.T) {
 	if strings.Contains(string(rawLog), "coverage is incomplete") {
 		t.Fatal("child logged the end-of-run incompleteness report: kill landed post-completion, not mid-run")
 	}
-	// Partial at kill: exactly the first detection got out before
-	// the stall parked the pipeline.
+	// Partial at kill: exactly the first nested detection got out
+	// before the stall parked the pipeline (raw root leaks ahead
+	// of it are Go-flate-version-dependent and ignored).
 	rawDets, err := os.ReadFile(detsPath)
 	if err != nil {
 		t.Fatalf("child detections unreadable: %v", err)
 	}
-	if got := len(strings.Split(strings.TrimSpace(string(rawDets)), "\n")); got != 1 {
-		t.Fatalf("child detections at kill = %d, want exactly 1 (stalled pipeline)", got)
+	nestedAtKill := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(rawDets)), "\n") {
+		// Root lines start with the scan path; nested
+		// targets start with Zipfile/ZipEntry/Gzipfile.
+		if !strings.HasPrefix(line, scanPath+"/") {
+			nestedAtKill++
+		}
+	}
+	if nestedAtKill != 1 {
+		t.Fatalf("child nested detections at kill = %d, want exactly 1 (stalled pipeline)", nestedAtKill)
 	}
 	// Journal honesty: frozen at the skip-free 1MB proven point,
 	// never completion.
@@ -230,7 +250,13 @@ func TestPubGateCrashResumeCongested(t *testing.T) {
 	rd := 0
 	rerr := ScanWithOptions(cp.Offset, scanPath, Options{
 		Log: &rlog, CheckpointPath: ckpt, CaseLogPath: filepath.Join(dir, "retry.log"),
-	}, func(Detection) { rd++ }, func(ProgressInfo) {})
+	}, func(d Detection) {
+		// Nested hits only: raw root leaks are
+		// Go-flate-version-dependent.
+		if d.Target != scanPath {
+			rd++
+		}
+	}, func(ProgressInfo) {})
 	if rerr != nil {
 		t.Fatalf("resume scan: %v\n%s", rerr, rlog.String())
 	}

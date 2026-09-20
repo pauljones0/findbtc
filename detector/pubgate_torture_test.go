@@ -130,6 +130,14 @@ func TestPubGateTorture(t *testing.T) {
 	t.Logf("torture archive: %d bytes, %d outer + %d mid + %d leaf members",
 		fi.Size(), outers, outers*mids, want)
 
+	// Leaf hits only: a hit counts when its target nests three
+	// deep (leaf in mid in outer in root). Whether DEFLATE bytes
+	// leak a literal needle into an ancestor's raw stream depends
+	// on the Go flate encoder version (Go 1.24: none; Go 1.27:
+	// one per mid member), but the torture contract — every leaf
+	// member read exactly once — concerns leaves only. The
+	// " in [" nesting shape is fixed by Describe, not stdlib.
+	isLeaf := func(d Detection) bool { return strings.Count(d.Target, " in [") == 3 }
 	keyOf := func(d Detection) string {
 		return fmt.Sprintf("%s/%d/%s", d.Target, d.Offset, d.Needle)
 	}
@@ -139,6 +147,9 @@ func TestPubGateTorture(t *testing.T) {
 		err = ScanWithOptions(start, path, Options{
 			Log: &lb, CheckpointPath: cpPath, CaseLogPath: clPath,
 		}, func(d Detection) {
+			if !isLeaf(d) {
+				return
+			}
 			dets++
 			if keys != nil {
 				keys[keyOf(d)] = true
@@ -248,6 +259,9 @@ func TestPubGateTorture(t *testing.T) {
 	rerr := ScanWithOptions(ccp.Offset, path, Options{
 		Log: &rlog, CheckpointPath: cpPath, CaseLogPath: filepath.Join(dir, "retry.log"),
 	}, func(d Detection) {
+		if !isLeaf(d) {
+			return
+		}
 		rd++
 		rkeys[keyOf(d)] = true
 	}, func(ProgressInfo) {})
