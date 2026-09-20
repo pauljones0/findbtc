@@ -239,8 +239,11 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 		t.Fatalf("congested journal offset = %d, want below size %d (completion must never journal)", cp.Offset, fi.Size())
 	}
 
-	// Retry equivalence: the same journal, uncongested, recovers
-	// the full baseline — omitted work is retried, never lost.
+	// Retry equivalence: the same journal, uncongested, converges
+	// to the full baseline UNION — banked members defer (never
+	// re-read, never re-emitted), omitted members are covered.
+	// Union (not per-run re-emission) is the banking contract:
+	// concatenated outputs carry each hit exactly once.
 	maxOutstandingPubs = 100
 	var rlog bytes.Buffer
 	var rd int
@@ -250,8 +253,8 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 	if rerr != nil {
 		t.Fatalf("retry scan: %v\n%s", rerr, rlog.String())
 	}
-	if rd != 10 {
-		t.Fatalf("retry detections = %d, want baseline 10\n%s", rd, rlog.String())
+	if cd+rd != 10 {
+		t.Fatalf("union detections = %d + %d, want baseline 10\n%s", cd, rd, rlog.String())
 	}
 	if st := lastCaseStatus(t, filepath.Join(dir, "retry.log")); st != "complete" {
 		t.Fatalf("retry case-log status = %q, want complete", st)

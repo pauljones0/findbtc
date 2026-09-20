@@ -9,6 +9,7 @@ import (
 	"hash"
 	"io"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -641,6 +642,10 @@ type pendingFrontier struct {
 	ranges []FSExtent
 	index  int
 	digest string
+	// covered carries the gate's banked nested members; writers
+	// attach a snapshot, completions leave nil (completion
+	// subsumes the list).
+	covered []string
 }
 
 // batchDigest streams the root bytes of one batch scan for the
@@ -686,10 +691,135 @@ type pubGate struct {
 	skipped     atomic.Int64
 	warned      atomic.Bool
 	log         io.Writer
+	// covered banks nested targets fully read this run (keyed by
+	// Describe(), stable across resumes of the same input), seeded
+	// from the journal at run start. Publishers defer banked
+	// members without consuming a slot, so congested retries
+	// converge instead of replaying the same admitted prefix.
+	// Only uncovered refusals count as skips. coverMu guards the
+	// maps: stage publishers check them while scanBlocks banks.
+	coverMu sync.Mutex
+	covered map[string]bool
+	// parentOf records every publish attempt's parent key, so a
+	// refusal can poison its ancestor chain: a banked parent
+	// whose child was refused must be re-read next run (its
+	// subtree is incomplete), or deferring it would strand the
+	// child forever. poisoned is subtracted at filing time, so
+	// the journal only ever files subtree-complete members.
+	parentOf map[string]string
+	poisoned map[string]bool
+	// deferredSkipped marks an EOF-flush refusal: recovery
+	// candidates publish at root EOF, after every mid-run
+	// frontier, so a trip there concerns pre-frontier bytes and
+	// no mid-run point is proven. The error path rewinds the
+	// journal to the run start when set.
+	deferredSkipped atomic.Bool
 }
 
 func newPubGate(log io.Writer) *pubGate {
 	return &pubGate{log: log}
+}
+
+// seedCovered loads banked members from the run-start journal.
+func (g *pubGate) seedCovered(keys []string) {
+	if g == nil || len(keys) == 0 {
+		return
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	if g.covered == nil {
+		g.covered = make(map[string]bool)
+	}
+	for _, k := range keys {
+		g.covered[k] = true
+	}
+}
+
+// bankCovered records a fully read nested target.
+func (g *pubGate) bankCovered(key string) {
+	if g == nil || key == "" {
+		return
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	if g.covered == nil {
+		g.covered = make(map[string]bool)
+	}
+	g.covered[key] = true
+}
+
+func (g *pubGate) isCovered(key string) bool {
+	if g == nil {
+		return false
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	return g.covered[key]
+}
+
+// snapshotCovered lists banked members minus poisoned ancestors,
+// sorted for stable journals; nil when empty so journals stay
+// lean. Only subtree-complete members are filed: a banked parent
+// with a refused child is re-read next run instead of deferred.
+func (g *pubGate) snapshotCovered() []string {
+	if g == nil {
+		return nil
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	var out []string
+	for k := range g.covered {
+		if !g.poisoned[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// parentKeyOf returns the publishing parent's key for a nested
+// target, or false for roots. The concrete nested types all carry
+// their source; caseKind in caselog.go switches the same way.
+func parentKeyOf(t scanTarget) (string, bool) {
+	switch v := t.(type) {
+	case *zipScanTarget:
+		return v.source.Describe(), true
+	case *zipEntryTarget:
+		return v.source.Describe(), true
+	case *gzipScanTarget:
+		return v.source.Describe(), true
+	default:
+		return "", false
+	}
+}
+
+// notePublish records a publish attempt's parent link, and on
+// refusal poisons the ancestor chain: every banked ancestor of a
+// refused child must be re-read next run. Nil-safe.
+func (g *pubGate) notePublish(t scanTarget, admitted bool) {
+	if g == nil {
+		return
+	}
+	pk, ok := parentKeyOf(t)
+	if !ok {
+		return
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	if g.parentOf == nil {
+		g.parentOf = make(map[string]string)
+	}
+	g.parentOf[t.Describe()] = pk
+	if admitted {
+		return
+	}
+	if g.poisoned == nil {
+		g.poisoned = make(map[string]bool)
+	}
+	for p := pk; p != ""; {
+		g.poisoned[p] = true
+		p = g.parentOf[p]
+	}
 }
 
 // tryPublish admits one publication, or refuses past the cap
@@ -739,11 +869,40 @@ func (g *pubGate) skippedCount() int64 {
 // gatePublish sends t unless the gate is full. Admitted sends
 // never block: outstanding counts exactly the channel's contents
 // (receives are the only removal, each paired with consumed), so
-// below the cap the channel always has room.
+// below the cap the channel always has room. Banked members defer
+// silently first: already-covered work is neither published nor
+// counted, so only uncovered refusals become skips. Callers must
+// treat false as unpublished (no EOF accounting either way).
 func gatePublish(g *pubGate, ch chan scanTarget, t scanTarget) bool {
-	if !g.tryPublish() {
+	if g.isCovered(t.Describe()) {
 		return false
 	}
+	if !g.tryPublish() {
+		g.notePublish(t, false)
+		return false
+	}
+	g.notePublish(t, true)
+	ch <- t
+	return true
+}
+
+// gatePublishFlush is gatePublish for the EOF recovery flush. A
+// refusal here also marks deferredSkipped: flush candidates
+// publish at root EOF, after every mid-run frontier, so the trip
+// concerns pre-frontier bytes and the error path must rewind the
+// journal to the run start instead of trusting a frozen point.
+func gatePublishFlush(g *pubGate, ch chan scanTarget, t scanTarget) bool {
+	if g.isCovered(t.Describe()) {
+		return false
+	}
+	if !g.tryPublish() {
+		if g != nil {
+			g.deferredSkipped.Store(true)
+		}
+		g.notePublish(t, false)
+		return false
+	}
+	g.notePublish(t, true)
 	ch <- t
 	return true
 }
@@ -783,6 +942,54 @@ type journalCtl struct {
 // writeScanCheckpoint journals root-target progress: a range entry when
 // the pipeline runs inside ScanRangesWithOptions, a legacy entry
 // otherwise.
+// seedCoveredFromJournal loads a previous attempt's banked nested
+// members so this run defers them. A missing journal is a fresh
+// run, not an error; keys are opaque and embed their source, so a
+// foreign journal's entries simply never match.
+func seedCoveredFromJournal(gate *pubGate, opts Options) {
+	if opts.CheckpointPath == "" {
+		return
+	}
+	cp, err := ReadCheckpoint(opts.CheckpointPath)
+	if err != nil {
+		return
+	}
+	if cp.IsBatch() {
+		for _, t := range cp.Targets {
+			if t.State == BatchActive {
+				gate.seedCovered(t.Covered)
+			}
+		}
+		return
+	}
+	gate.seedCovered(cp.Covered)
+}
+
+// frozenResumeOffset returns the journaled point the error path must
+// keep: the filed offset when this run journaled one, else the run
+// start. Mid-run points only journal while skip-free, so the filed
+// point is proven; callers overwrite it with the same offset plus
+// the run's banked members (or rewind it on deferred skips).
+func frozenResumeOffset(opts Options, seed scanTarget) int64 {
+	start := seed.StartOffset()
+	cp, err := ReadCheckpoint(opts.CheckpointPath)
+	if err != nil {
+		return start
+	}
+	if cp.IsBatch() {
+		for _, t := range cp.Targets {
+			if t.State == BatchActive && t.Offset > start {
+				return t.Offset
+			}
+		}
+		return start
+	}
+	if cp.Offset > start {
+		return cp.Offset
+	}
+	return start
+}
+
 // frontierFor builds the journal point for target read up to offset.
 func frontierFor(opts Options, target scanTarget, offset int64) *pendingFrontier {
 	p := &pendingFrontier{desc: target.Describe(), offset: offset}
@@ -812,6 +1019,10 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 				if p.digest != "" {
 					tgts[i].SHA256 = p.digest
 				}
+				// Covered banking replaces wholesale: the
+				// gate's set only grows within a run, and a
+				// completion files nil (subsumed).
+				tgts[i].Covered = p.covered
 			}
 		}
 		cp := Checkpoint{Offset: 0, Targets: tgts}
@@ -826,10 +1037,10 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 		return
 	}
 	if p.ranges != nil {
-		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset)
+		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset, p.covered)
 		return
 	}
-	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset)
+	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset, p.covered)
 }
 
 // firstRangeDiff returns the first index where two range lists differ, or
@@ -934,6 +1145,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 		}
 	}
 	gate := newPubGate(opts.logWriter())
+	seedCoveredFromJournal(gate, opts)
 	defer func() {
 		if n := gate.skippedCount(); n > 0 {
 			opts.logf("[scan] WARNING: skipped %d nested archives past the %d publication cap; coverage is incomplete\n", n, maxOutstandingPubs)
@@ -1005,11 +1217,34 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 			if jc != nil {
 				select {
 				case ff := <-jc.final:
+					// Completion subsumes banking: drop the
+					// covered list instead of filing it.
+					ff.covered = nil
 					writeFrontier(opts, ff)
 				default:
 				}
 			}
 			return nil
+		}
+		if jc != nil {
+			// Banked members must survive the error return or
+			// the next attempt replays them: file the covered
+			// snapshot at the frozen point. A deferred flush
+			// refusal additionally rewinds the offset to the
+			// run start, because it poisons every mid-run
+			// point (recovery candidates publish at root
+			// EOF, after all frontiers journaled, so the
+			// trip concerns pre-frontier bytes a frozen
+			// point would strand). Residual: a SIGKILL
+			// inside the microseconds between the flush and
+			// this write still strands — inherent to any
+			// end-of-run journaling.
+			ep := frontierFor(opts, seed, frozenResumeOffset(opts, seed))
+			if gate.deferredSkipped.Load() {
+				ep.offset = seed.StartOffset()
+			}
+			ep.covered = gate.snapshotCovered()
+			writeFrontier(opts, ep)
 		}
 		return signal
 	case <-userCtx.Done():
@@ -1034,13 +1269,20 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		}
 		gate.consumed()
 
-		// Only the root target is journaled; nested archives re-scan on
-		// resume, which is cheap relative to the device that holds them.
+		// Only the root target is journaled by offset; nested
+		// archives bank by identity, so a congested retry defers
+		// members already read instead of replaying them.
 		isRoot := firstTarget
 		firstTarget = false
 		outcome, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, target, isRoot)
 		if !alive {
 			return
+		}
+		if !isRoot && outcome.opened {
+			// Banked only once fully read: Describe() is
+			// stable across resumes of the same input, so
+			// the key re-identifies this member next run.
+			gate.bankCovered(target.Describe())
 		}
 		if isRoot && opts.strictRoot {
 			// The root promised bytes but yielded none (vanished
@@ -1322,8 +1564,12 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 				return false
 			case nested := <-targets:
 				gate.consumed()
-				if _, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, nested, false); !alive {
+				nestedOutcome, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, nested, false)
+				if !alive {
 					return false
+				}
+				if nestedOutcome.opened {
+					gate.bankCovered(nested.Describe())
 				}
 			default:
 				drained = true
@@ -1344,7 +1590,9 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 			continue
 		}
 		if gate.skippedCount() == 0 {
-			writeFrontier(opts, frontierFor(opts, root, offset))
+			fp := frontierFor(opts, root, offset)
+			fp.covered = gate.snapshotCovered()
+			writeFrontier(opts, fp)
 		}
 		// A skip counted by now poisons this frontier: some
 		// nested work from already-read root bytes was

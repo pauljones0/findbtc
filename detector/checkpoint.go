@@ -28,6 +28,13 @@ type Checkpoint struct {
 	// batch discriminator; legacy journals omit both.
 	Targets []BatchTarget `json:"targets,omitempty"`
 	Run     *BatchRun     `json:"run,omitempty"`
+	// Covered banks nested targets fully read in congested runs
+	// (G42b): each entry is the member's Describe() string, stable
+	// across resume attempts of the same input. A retry defers
+	// re-publishing banked members, so same-cap attempts converge
+	// instead of replaying the same admitted prefix. Completion
+	// drops the list (it subsumes it). Opaque to old binaries.
+	Covered []string `json:"covered,omitempty"`
 }
 
 // Batch target states: pending (never started), active (in flight,
@@ -52,6 +59,10 @@ type BatchTarget struct {
 	State  string `json:"state"`
 	Offset int64  `json:"offset"`
 	SHA256 string `json:"sha256,omitempty"`
+	// Covered banks nested targets fully read while this entry
+	// ran congested; see Checkpoint.Covered. Main adopts the
+	// filed list like Offset/SHA256 and never invents one.
+	Covered []string `json:"covered,omitempty"`
 }
 
 // BatchRun binds the run options progress was produced under.
@@ -78,15 +89,15 @@ const checkpointBlockInterval = 256
 
 // writeCheckpoint atomically records that path is scanned up to offset.
 // Journal failures warn; they must never fail the scan itself.
-func writeCheckpoint(log io.Writer, file, path string, offset int64) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC()})
+func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered})
 }
 
 // writeCheckpointRange atomically records range-scan progress: ranges is
 // the full range list (for resume validation), index the range in flight,
 // offset the absolute file offset scanned up to within it.
-func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index})
+func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered})
 }
 
 func writeCheckpointData(log io.Writer, file string, cp Checkpoint) {

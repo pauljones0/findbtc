@@ -130,12 +130,20 @@ func TestPubGateTorture(t *testing.T) {
 	t.Logf("torture archive: %d bytes, %d outer + %d mid + %d leaf members",
 		fi.Size(), outers, outers*mids, want)
 
-	scan := func(cap int64, start int64, cpPath, clPath string) (dets int, err error, log string) {
+	keyOf := func(d Detection) string {
+		return fmt.Sprintf("%s/%d/%s", d.Target, d.Offset, d.Needle)
+	}
+	scan := func(cap int64, start int64, cpPath, clPath string, keys map[string]bool) (dets int, err error, log string) {
 		maxOutstandingPubs = cap
 		var lb bytes.Buffer
 		err = ScanWithOptions(start, path, Options{
 			Log: &lb, CheckpointPath: cpPath, CaseLogPath: clPath,
-		}, func(Detection) { dets++ }, func(ProgressInfo) {})
+		}, func(d Detection) {
+			dets++
+			if keys != nil {
+				keys[keyOf(d)] = true
+			}
+		}, func(ProgressInfo) {})
 		return dets, err, lb.String()
 	}
 	lastCaseStatus := func(t *testing.T, clPath string) string {
@@ -156,7 +164,7 @@ func TestPubGateTorture(t *testing.T) {
 	// fully — nil error, exact detection count (no drops, no
 	// hang), clean case-log completion, and the completion
 	// frontier journaled at exactly the file size.
-	bd, berr, blog := scan(defCap, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"))
+	bd, berr, blog := scan(defCap, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"), nil)
 	if berr != nil {
 		t.Fatalf("baseline scan: %v", berr)
 	}
@@ -191,7 +199,8 @@ func TestPubGateTorture(t *testing.T) {
 	// skip-free at exactly checkpointBlockInterval 4kB blocks —
 	// root reads are sequential full blocks from offset 0.
 	cpPath, clPath := filepath.Join(dir, "cong.cp"), filepath.Join(dir, "cong.log")
-	cd, cerr, clog := scan(3, 0, cpPath, clPath)
+	ckeys := map[string]bool{}
+	cd, cerr, clog := scan(3, 0, cpPath, clPath, ckeys)
 	if cerr == nil || !strings.Contains(cerr.Error(), "incomplete coverage") {
 		t.Fatalf("congested scan error = %v, want incomplete-coverage error", cerr)
 	}
@@ -219,27 +228,43 @@ func TestPubGateTorture(t *testing.T) {
 	}
 	t.Logf("congested: %d detections (< %d), honest error, journal frozen at %d", cd, want, ccp.Offset)
 
-	// Phase 3, retry: the frozen journal, uncongested, recovers
-	// the full baseline count exactly — omitted work is retried,
-	// never lost. Exactness holds because resume re-reads the
-	// end-of-root directory (absolute offsets republish every
-	// member regardless of the resume point), nested targets
-	// always re-scan fully, and the resumed root tail (pad zeros,
-	// central directory) carries no raw needle.
+	// Phase 3, retry: the frozen journal, uncongested, converges to
+	// the full baseline UNION exactly — banked members defer
+	// (never re-read, never re-emitted), omitted members are
+	// covered, nothing is lost and nothing duplicates. Union (not
+	// per-run re-emission) is the banking contract: the congested
+	// run's detections stay delivered, so concatenated outputs
+	// carry each hit exactly once. Exactness holds because resume
+	// re-reads the end-of-root directory (absolute offsets
+	// republish every member regardless of the resume point),
+	// poisoned ancestors re-read (subtree-incomplete banking is
+	// never filed), and the resumed root tail (pad zeros, central
+	// directory) carries no raw needle — hence the empty
+	// intersection below: no root-seam re-emission exists here.
 	maxOutstandingPubs = defCap
 	var rlog bytes.Buffer
 	var rd int
+	rkeys := map[string]bool{}
 	rerr := ScanWithOptions(ccp.Offset, path, Options{
 		Log: &rlog, CheckpointPath: cpPath, CaseLogPath: filepath.Join(dir, "retry.log"),
-	}, func(Detection) { rd++ }, func(ProgressInfo) {})
+	}, func(d Detection) {
+		rd++
+		rkeys[keyOf(d)] = true
+	}, func(ProgressInfo) {})
 	if rerr != nil {
 		t.Fatalf("retry scan: %v", rerr)
 	}
-	if rd != want {
-		t.Fatalf("retry detections = %d, want baseline %d", rd, want)
+	for k := range rkeys {
+		if ckeys[k] {
+			t.Fatalf("retry re-emitted congested-run detection %q: banked members must defer", k)
+		}
+		ckeys[k] = true
+	}
+	if len(ckeys) != want {
+		t.Fatalf("union detections = %d, want baseline %d (congested %d + retry %d)", len(ckeys), want, cd, rd)
 	}
 	if st := lastCaseStatus(t, filepath.Join(dir, "retry.log")); st != "complete" {
 		t.Fatalf("retry case-log status = %q, want complete", st)
 	}
-	t.Logf("retry: %d detections, full baseline recovered", rd)
+	t.Logf("retry: %d detections, union %d/%d recovered", rd, len(ckeys), want)
 }

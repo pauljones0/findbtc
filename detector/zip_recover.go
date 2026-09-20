@@ -142,7 +142,7 @@ func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTarg
 		if covered {
 			continue
 		}
-		if !gatePublish(gate, scanTargets, &zipEntryTarget{
+		if !gatePublishFlush(gate, scanTargets, &zipEntryTarget{
 			source:     c.source,
 			name:       c.name,
 			dataOff:    c.dataOff,

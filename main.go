@@ -597,6 +597,10 @@ func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed
 					if err == nil && t.SHA256 != "" {
 						manifest.Targets[i].SHA256 = t.SHA256
 					}
+					// Banked nested members replace wholesale:
+					// the filed set only grows within a run,
+					// and a completion files nil (subsumed).
+					manifest.Targets[i].Covered = t.Covered
 				}
 			}
 			if err != nil {
