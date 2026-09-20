@@ -7,10 +7,6 @@ on:
 jobs:
   test:
     strategy:
-      # TEMPORARY (Goal 40 diagnosis): show every platform failure in
-      # one run instead of fail-fast cancelling the matrix. Revert
-      # once the matrix is green.
-      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         go-version: [stable, oldstable]
