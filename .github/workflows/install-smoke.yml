@@ -85,6 +85,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: documented raw URLs fetch the same manifests
+        shell: pwsh
+        run: |
+          $base = "https://raw.githubusercontent.com/pauljones0/findbtc/${{ github.sha }}/packaging/winget"
+          foreach ($f in @('pauljones0.findbtc.yaml', 'pauljones0.findbtc.installer.yaml', 'pauljones0.findbtc.locale.en-US.yaml')) {
+            Invoke-WebRequest -Uri "$base/$f" -OutFile "$env:RUNNER_TEMP/$f"
+            if ((Get-FileHash "$env:RUNNER_TEMP/$f").Hash -ne (Get-FileHash "packaging/winget/$f").Hash) { throw "$f differs from raw fetch" }
+          }
       - name: validate manifests
         shell: pwsh
         run: winget validate --manifest packaging/winget
