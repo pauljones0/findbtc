@@ -103,11 +103,16 @@ A congested run — more nested archives in flight than the
 publication cap admits — drains what it admitted and then fails
 honestly with an `incomplete coverage` error instead of clean
 completion: the case log records status `error`, the checkpoint
-keeps only its last skip-free proven point (completion never
-journals), and a batch entry lands in `failed`, never `complete`.
-Resume retries from the frozen point and re-covers the omitted
-bytes, so an uncongested retry concatenates to the full set
-(same seam-dedup rule as above for re-reported hits).
+keeps its last skip-free proven point plus the banked members it
+already read (completion never journals), and a batch entry lands
+in `failed`, never `complete`. Resume retries from the frozen
+point and covers only the omitted members — banked ones defer,
+so same-cap retries converge (a handful of attempts for a
+ten-member burst) and concatenated `-json` outputs carry each
+nested hit exactly once, with no cross-attempt duplicates. (A
+directory-less recovery trip additionally rewinds the offset to
+the run start, since its bytes precede every mid-run point.)
+Root-seam re-emission keeps the dedup rule above.
 
 Carves survive kills: every carve file commits atomically (a kill
 leaves complete files, never torn bytes), a resumed run continues
