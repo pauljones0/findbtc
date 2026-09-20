@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/pauljones0/findbtc/detector"
 )
 
 // testBinary is a built findbtc used by subprocess exit-code tests.
@@ -1088,15 +1090,74 @@ func TestTokenlistForeignJSONVerbatim(t *testing.T) {
 // tiny fixture announces byte offset 0 (continuing at 0%).
 func TestResumePrintsPosition(t *testing.T) {
 	dir := t.TempDir()
-	target := writeGateFile(t, dir, "target.bin", strings.Repeat("x", 100))
+	target := writeGateFile(t, dir, "target.bin", strings.Repeat("x", 10000))
+	ident, ok := detector.FileIdentityOf(target)
+	if !ok {
+		t.Skip("no byte identity on this platform")
+	}
+	identJSON, err := json.Marshal(ident)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Genuine identity + mid-file offset: the frontier is
+	// honored (rewound past the overlap window to the block
+	// grid), proving resume — not rescan — prints the position.
 	ckpt := writeGateFile(t, dir, "ckpt.json",
-		fmt.Sprintf("{\"path\":%q,\"offset\":41,\"updated\":\"2026-01-01T00:00:00Z\"}\n", target))
+		fmt.Sprintf("{\"path\":%q,\"offset\":9000,\"updated\":\"2026-01-01T00:00:00Z\",\"identity\":%s}\n", target, identJSON))
 	_, stderr, exit := runTestBinary(t, "-checkpoint", ckpt, "-resume", target)
 	if exit != 0 {
 		t.Fatalf("resume exit %d (stderr: %s)", exit, firstLine(stderr))
 	}
-	if !strings.Contains(stderr, "at byte offset 0 (continuing at 0%)") {
+	if !strings.Contains(stderr, "at byte offset 4096 (continuing at 40%)") {
 		t.Errorf("resume must print byte offset and percent, stderr:\n%s", stderr)
+	}
+}
+
+// Swapped bytes must not inherit a single-target frontier: a
+// genuine journal (offset past the only needle) plus a
+// same-size, mtime-restored replacement rescans from zero and
+// reprints, instead of skipping contents never read.
+func TestResumeSwappedBytesRescan(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("in-place mtime forgery is invisible to Windows stdlib identity (documented residual)")
+	}
+	dir := t.TempDir()
+	// Needle up front, bulk after: an honored offset would skip
+	// the only hit.
+	target := writeGateFile(t, dir, "target.bin", "bestblock"+strings.Repeat("z", 10000))
+	journal := filepath.Join(dir, "swap.cp")
+	stdout, stderr, exit := runTestBinary(t, "-json", "-checkpoint", journal, target)
+	if exit != 0 {
+		t.Fatalf("initial scan exit %d\n%s", exit, stderr)
+	}
+	if !strings.Contains(stdout, "bestblock") {
+		t.Fatalf("initial scan missed the needle\n%s", stdout)
+	}
+	// Same size, restored mtime, changed middle: the cheap
+	// metadata matches, so only kernel identity refuses.
+	st, err := os.Stat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	swapped := "bestblock" + strings.Repeat("q", 10000)
+	if len(swapped) != int(st.Size()) {
+		t.Fatalf("swap fixture must preserve size: %d vs %d", len(swapped), st.Size())
+	}
+	if err := os.WriteFile(target, []byte(swapped), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(target, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, exit = runTestBinary(t, "-json", "-checkpoint", journal, "-resume", target)
+	if exit != 0 {
+		t.Fatalf("resume exit %d\n%s", exit, stderr)
+	}
+	if !strings.Contains(stderr, "rescanning from the start") {
+		t.Errorf("swapped bytes must refuse the frontier loudly, stderr:\n%s", stderr)
+	}
+	if !strings.Contains(stdout, "bestblock") {
+		t.Errorf("swapped bytes must rescan and reprint the hit, stdout:\n%s", stdout)
 	}
 }
 

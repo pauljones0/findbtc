@@ -391,8 +391,16 @@ func main() {
 			// journal point still match; the announcement and
 			// percent below name the rewound point actually
 			// scanned. -s keeps its exact offset and never
-			// rewinds.
-			start = detector.ResumeRewindOffset(0, cp.Offset)
+			// rewinds. The frontier is honored only when the
+			// current bytes still match the journaled
+			// identity — replaced bytes rescan from zero
+			// instead of skipping contents never read.
+			if trustOff, _, note := detector.IdentityTrust(cp.Ident, path); !trustOff {
+				fmt.Fprintf(os.Stderr, "[main] WARNING: %s\n", note)
+				start = 0
+			} else {
+				start = detector.ResumeRewindOffset(0, cp.Offset)
+			}
 			msg := fmt.Sprintf("[main] Resuming %s at byte offset %d", path, start)
 			// Percent needs a known size; without one the byte
 			// offset stands alone (unchanged legacy shape).
@@ -600,7 +608,9 @@ func runMultiTarget(targets []string, unallocated bool, fsOffset int64, autoSeed
 					// Banked nested members replace wholesale:
 					// the filed set only grows within a run,
 					// and a completion files nil (subsumed).
+					// Identity likewise (run-start attested).
 					manifest.Targets[i].Covered = t.Covered
+					manifest.Targets[i].Ident = t.Ident
 				}
 			}
 			if err != nil {
@@ -683,31 +693,32 @@ func openBatchManifest(targets []string, checkpointPath string, resume bool, run
 func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, checkpointPath string, log io.Writer) (int64, bool) {
 	entry := &m.Targets[i]
 	size, mtime := detector.BatchIdentity(tgt)
+	trustOff, trustCov, note := detector.IdentityTrust(entry.Ident, tgt)
 	if resume && entry.State == detector.BatchComplete {
-		// A skip vouches for these exact bytes: identity must
-		// match, and a journaled digest must re-hash. Anything
+		// A skip vouches for these exact bytes: a journaled
+		// digest re-hashes, and digest-less entries
+		// (resumed-then-completed, or journals predating
+		// digests) skip only on exact identity. Anything
 		// else rescans loudly — a replaced target is new
-		// evidence, not covered evidence. Entries without a
-		// digest (resumed-then-completed, or a journal that
-		// predates digests) skip on identity alone.
-		skip := detector.BatchIdentityMatches(*entry, size, mtime)
-		if skip && entry.SHA256 != "" {
-			if err := detector.VerifyBatchDigest(tgt, size, entry.SHA256); err != nil {
+		// evidence, not covered evidence.
+		skip := false
+		if entry.SHA256 != "" {
+			if !detector.BatchIdentityMatches(*entry, size, mtime) {
+				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
+			} else if err := detector.VerifyBatchDigest(tgt, size, entry.SHA256); err != nil {
 				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s fails digest verification (%s); rescanning from the start\n", tgt, err.Error())
-				skip = false
+			} else {
+				skip = true
+			}
+		} else {
+			skip = trustOff
+			if !skip {
+				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
 			}
 		}
 		if skip {
 			fmt.Fprintf(os.Stderr, "[main] batch: skipping %s (already complete)\n", tgt)
 			return 0, true
-		}
-		// A digest mismatch warned above; an identity mismatch
-		// warns here. Either way the old offset, digest, and
-		// banked members are meaningless for the bytes now on
-		// disk: stale covered keys would defer members never
-		// read in the current content.
-		if !detector.BatchIdentityMatches(*entry, size, mtime) {
-			fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
 		}
 		entry.Offset = 0
 		entry.Covered = nil
@@ -718,7 +729,7 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 		if entry.State == detector.BatchFailed {
 			verb = "retrying failed target"
 		}
-		if entry.Offset > 0 && detector.BatchIdentityMatches(*entry, size, mtime) {
+		if entry.Offset > 0 && trustOff {
 			start = detector.ResumeRewindOffset(0, entry.Offset)
 			msg := fmt.Sprintf("[main] batch: %s %s at byte offset %d", verb, tgt, start)
 			if size > 0 && start >= 0 && start <= size {
@@ -730,20 +741,27 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 				fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since the journal entry; rescanning from the start\n", tgt)
 			} else {
 				fmt.Fprintf(os.Stderr, "[main] batch: %s %s from the start\n", verb, tgt)
+				if !trustCov && len(entry.Covered) > 0 && note != "" {
+					fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s; banked members re-scanned\n", note)
+				}
 			}
 			entry.Offset = 0
-			// Banked members survive only for the same bytes:
-			// a rewound (offset 0) journal keeps its covered
-			// set, while replaced bytes drop it — stale keys
-			// would defer members never read in the current
-			// content.
-			if !detector.BatchIdentityMatches(*entry, size, mtime) {
-				entry.Covered = nil
-			}
+		}
+		// Banked members survive only for the same bytes: a
+		// rewound (offset 0) journal keeps its covered set,
+		// while replaced bytes drop it — stale keys would
+		// defer members never read in the current content.
+		if !trustCov {
+			entry.Covered = nil
 		}
 	}
 	entry.State = detector.BatchActive
 	entry.Size, entry.Mtime = size, mtime
+	if ident, ok := detector.FileIdentityOf(tgt); ok {
+		entry.Ident = ident
+	} else {
+		entry.Ident = detector.FileIdentity{}
+	}
 	// A new scan certifies a new digest (or none); the old one
 	// must not linger into this run's journal entries.
 	entry.SHA256 = ""

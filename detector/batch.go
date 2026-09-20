@@ -27,7 +27,8 @@ func NewBatchManifest(targets []string, run BatchRun) *BatchManifest {
 	m := &BatchManifest{Run: run}
 	for _, t := range targets {
 		size, mtime := BatchIdentity(t)
-		m.Targets = append(m.Targets, BatchTarget{Path: t, Size: size, Mtime: mtime, State: BatchPending})
+		ident, _ := FileIdentityOf(t)
+		m.Targets = append(m.Targets, BatchTarget{Path: t, Size: size, Mtime: mtime, Ident: ident, State: BatchPending})
 	}
 	return m
 }
@@ -81,7 +82,9 @@ func matchBatchRun(have, want BatchRun) error {
 
 // BatchIdentityMatches reports whether a fresh stat still matches
 // the journaled identity: unknown journaled identity (-1, 0)
-// never matches, so such entries always rescan.
+// never matches, so such entries always rescan. Cheap tier only —
+// same-size rewrites with restored mtimes match here and must be
+// decided by digest re-hash or exact FileIdentity.
 func BatchIdentityMatches(t BatchTarget, size, mtime int64) bool {
 	if t.Size < 0 || t.Mtime == 0 {
 		return false

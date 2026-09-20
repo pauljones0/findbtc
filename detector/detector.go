@@ -625,6 +625,14 @@ func readRangeResume(log io.Writer, file, path string, ranges []FSExtent) (idx i
 		return 0, 0, false, fmt.Errorf("checkpoint offset %d outside range %d [%d,%d): refusing to resume",
 			cp.Offset, cp.RangeIndex, r.Start, r.Start+r.Len)
 	}
+	// The frontier is honored only when the current bytes still
+	// match the journaled identity — replaced bytes restart
+	// instead of skipping contents never read. (Volumes keep
+	// legacy trust: unattestable anywhere; see IdentityTrust.)
+	if trustOff, _, note := IdentityTrust(cp.Ident, path); !trustOff {
+		logLinef(log, "[checkpoint] WARNING: %s\n", note)
+		return 0, -1, true, nil
+	}
 	return cp.RangeIndex, cp.Offset, true, nil
 }
 
@@ -646,6 +654,9 @@ type pendingFrontier struct {
 	// attach a snapshot, completions leave nil (completion
 	// subsumes the list).
 	covered []string
+	// ident attests the run-start bytes, copied from
+	// journalCtl.ident by writers holding jc.
+	ident FileIdentity
 }
 
 // batchDigest streams the root bytes of one batch scan for the
@@ -982,6 +993,12 @@ type journalCtl struct {
 	// Truncated or resumed coverage simply never verifies, so a
 	// skip falls back to a rescan, never to blind trust.
 	digest *batchDigest
+	// ident attests the seed bytes once at run start; every
+	// frontier this run files carries it, so a resume can tell
+	// whether the current bytes are the journaled ones. Captured
+	// up front (not at write time) so bytes changing mid-run
+	// cannot bless their own stale progress.
+	ident FileIdentity
 }
 
 // writeScanCheckpoint journals root-target progress: a range entry when
@@ -989,12 +1006,12 @@ type journalCtl struct {
 // otherwise.
 // seedCoveredFromJournal loads a previous attempt's banked nested
 // members so this run defers them. A missing journal is a fresh
-// run, not an error. Seeding is identity-gated: member keys embed
-// the source path but not its content, so a same-path byte swap
-// would otherwise defer members never read in the current bytes —
-// replaced content re-reads everything instead. Main enforces the
-// same rule when it resets batch entries; this covers direct
-// detector callers and range scans.
+// run, not an error. Seeding is identity-gated through
+// IdentityTrust: member keys embed the source path but not its
+// content, so replaced bytes re-read everything instead of
+// deferring members never read in the current content. Main
+// enforces the same rule for offsets when it resets batch entries
+// and single/range resumes; this covers direct detector callers.
 func seedCoveredFromJournal(gate *pubGate, opts Options, seed scanTarget) {
 	if opts.CheckpointPath == "" {
 		return
@@ -1008,10 +1025,10 @@ func seedCoveredFromJournal(gate *pubGate, opts Options, seed scanTarget) {
 			if t.State != BatchActive {
 				continue
 			}
-			size, mtime := BatchIdentity(t.Path)
-			if !BatchIdentityMatches(t, size, mtime) {
-				if len(t.Covered) > 0 {
-					opts.logf("[scan] WARNING: batch journal identity for %s changed; banked members re-scanned\n", t.Path)
+			_, covered, note := IdentityTrust(t.Ident, t.Path)
+			if !covered {
+				if len(t.Covered) > 0 && note != "" {
+					opts.logf("[scan] WARNING: %s; banked members re-scanned\n", note)
 				}
 				continue
 			}
@@ -1019,9 +1036,10 @@ func seedCoveredFromJournal(gate *pubGate, opts Options, seed scanTarget) {
 		}
 		return
 	}
-	if !journalIdentityMatches(cp, seed.Describe()) {
-		if len(cp.Covered) > 0 {
-			opts.logf("[scan] WARNING: checkpoint identity for %s changed; banked members re-scanned\n", seed.Describe())
+	_, covered, note := IdentityTrust(cp.Ident, seed.Describe())
+	if !covered {
+		if len(cp.Covered) > 0 && note != "" {
+			opts.logf("[scan] WARNING: %s; banked members re-scanned\n", note)
 		}
 		return
 	}
@@ -1084,8 +1102,10 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 				}
 				// Covered banking replaces wholesale: the
 				// gate's set only grows within a run, and a
-				// completion files nil (subsumed).
+				// completion files nil (subsumed). Identity
+				// is the run-start attestation, likewise.
 				tgts[i].Covered = p.covered
+				tgts[i].Ident = p.ident
 			}
 		}
 		cp := Checkpoint{Offset: 0, Targets: tgts}
@@ -1100,10 +1120,10 @@ func writeFrontier(opts Options, p *pendingFrontier) {
 		return
 	}
 	if p.ranges != nil {
-		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset, p.covered)
+		writeCheckpointRange(log, opts.CheckpointPath, p.desc, p.ranges, p.index, p.offset, p.covered, p.ident)
 		return
 	}
-	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset, p.covered)
+	writeCheckpoint(log, opts.CheckpointPath, p.desc, p.offset, p.covered, p.ident)
 }
 
 // firstRangeDiff returns the first index where two range lists differ, or
@@ -1206,6 +1226,9 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 		if opts.BatchJournal != nil {
 			jc.digest = newBatchDigest()
 		}
+		if ident, ok := FileIdentityOf(seed.Describe()); ok {
+			jc.ident = ident
+		}
 	}
 	gate := newPubGate(opts.logWriter())
 	seedCoveredFromJournal(gate, opts, seed)
@@ -1307,6 +1330,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 				ep.offset = seed.StartOffset()
 			}
 			ep.covered = gate.snapshotCovered()
+			ep.ident = jc.ident
 			writeFrontier(opts, ep)
 		}
 		return signal
@@ -1369,6 +1393,7 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 			if jc.digest != nil && target.StartOffset() == 0 {
 				ff.digest = jc.digest.hex()
 			}
+			ff.ident = jc.ident
 			jc.final <- ff
 		}
 	}
@@ -1655,6 +1680,7 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 		if gate.skippedCount() == 0 {
 			fp := frontierFor(opts, root, offset)
 			fp.covered = gate.snapshotCovered()
+			fp.ident = jc.ident
 			writeFrontier(opts, fp)
 		}
 		// A skip counted by now poisons this frontier: some

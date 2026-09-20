@@ -63,7 +63,7 @@ func TestRawResumeKillAtJournalPoint(t *testing.T) {
 		t.Fatal("fixture produced no detections")
 	}
 	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
-	writeCheckpoint(nil, ckpt, path, O, nil)
+	writeCheckpoint(nil, ckpt, path, O, nil, testIdent(path))
 	cp, err := ReadCheckpoint(ckpt)
 	if err != nil {
 		t.Fatal(err)

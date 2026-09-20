@@ -44,6 +44,13 @@ type Checkpoint struct {
 	// binaries, which never match and simply re-cover.
 	Size  int64 `json:"size,omitempty"`
 	Mtime int64 `json:"mtime,omitempty"`
+	// Ident is the kernel-attested run-start identity (device /
+	// inode / size / mtime / ctime) the Size/Mtime pair alone
+	// cannot prove: same-size rewrites with restored mtimes
+	// match metadata but change bytes. Matching uses Ident only;
+	// Size/Mtime stay as cheap human-readable checks. Absent on
+	// older journals, which never match and rescan.
+	Ident FileIdentity `json:"identity,omitempty"`
 }
 
 // Batch target states: pending (never started), active (in flight,
@@ -72,6 +79,10 @@ type BatchTarget struct {
 	// ran congested; see Checkpoint.Covered. Main adopts the
 	// filed list like Offset/SHA256 and never invents one.
 	Covered []string `json:"covered,omitempty"`
+	// Ident attests the run-start bytes Offset/Covered describe;
+	// see Checkpoint.Ident. Resume honors filed progress only on
+	// identity match.
+	Ident FileIdentity `json:"identity,omitempty"`
 }
 
 // BatchRun binds the run options progress was produced under.
@@ -97,30 +108,48 @@ func (cp Checkpoint) IsBatch() bool {
 const checkpointBlockInterval = 256
 
 // writeCheckpoint atomically records that path is scanned up to offset.
-// Journal failures warn; they must never fail the scan itself.
-func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string) {
-	size, mtime := BatchIdentity(path)
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered, Size: size, Mtime: mtime})
+// Journal failures warn; they must never fail the scan itself. ident is
+// the RUN-START identity: filing write-time identity would bless stale
+// progress when bytes change mid-run, so callers capture it once up
+// front and file it at every point.
+func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string, ident FileIdentity) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident})
 }
 
 // writeCheckpointRange atomically records range-scan progress: ranges is
 // the full range list (for resume validation), index the range in flight,
 // offset the absolute file offset scanned up to within it.
-func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string) {
-	size, mtime := BatchIdentity(path)
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered, Size: size, Mtime: mtime})
+func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string, ident FileIdentity) {
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered, Size: ident.Size, Mtime: ident.MtimeNS / 1e9, Ident: ident})
 }
 
-// journalIdentityMatches reports whether a filed journal still
-// describes the bytes now at path: both size and mtime must match,
-// and unknown/zero identities never match (old journals simply
-// re-cover their banked members).
-func journalIdentityMatches(cp Checkpoint, path string) bool {
-	if cp.Size < 0 || cp.Mtime == 0 {
-		return false
+// IdentityTrust decides whether filed journal progress (a frontier
+// offset, a covered set) may be honored for path. Regular files
+// with exact identity match honor both; replaced bytes rescan
+// both, with a note for warnings. Non-regular targets (volumes,
+// pipes) keep legacy offset trust — no platform can attest their
+// bytes, and refusing would end resume for raw media — while
+// dropping covered sets, which re-reading re-covers. Missing
+// files rescan so the open fails honestly instead of skipping.
+// Legacy journals (empty identity) rescan once on upgrade.
+func IdentityTrust(filed FileIdentity, path string) (offset, covered bool, note string) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return false, false, "cannot stat " + path + "; rescanning from the start"
 	}
-	size, mtime := BatchIdentity(path)
-	return cp.Size == size && cp.Mtime == mtime
+	if !fi.Mode().IsRegular() {
+		return true, false, ""
+	}
+	cur, ok := FileIdentityOf(path)
+	if !ok {
+		// Regular file on an unattested platform: sound
+		// refusal (full rescan), outside the CI matrix.
+		return false, false, "no byte identity available for " + path + "; rescanning from the start"
+	}
+	if filed.Matches(cur) {
+		return true, true, ""
+	}
+	return false, false, "journal identity for " + path + " does not match current bytes; rescanning from the start"
 }
 
 func writeCheckpointData(log io.Writer, file string, cp Checkpoint) {

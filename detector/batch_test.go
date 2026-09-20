@@ -9,6 +9,19 @@ import (
 	"testing"
 )
 
+func TestBatchIdentityMatches(t *testing.T) {
+	known := BatchTarget{Path: "a", Size: 10, Mtime: 5, State: BatchActive}
+	if !BatchIdentityMatches(known, 10, 5) {
+		t.Error("identical identity did not match")
+	}
+	if BatchIdentityMatches(known, 11, 5) || BatchIdentityMatches(known, 10, 6) {
+		t.Error("changed identity matched")
+	}
+	unknown := BatchTarget{Path: "a", Size: -1, State: BatchActive}
+	if BatchIdentityMatches(unknown, -1, 0) {
+		t.Error("unknown identity matched")
+	}
+}
 func testBatchRun() BatchRun {
 	return BatchRun{Profile: "p", CarveDir: "c", Context: 8, JSON: true, Reveal: true, Baseline: "b", CaseLog: "l"}
 }
@@ -63,20 +76,6 @@ func TestMatchBatchManifestRefusals(t *testing.T) {
 		if _, err := MatchBatchManifest(c.cp, c.targets, c.run); err == nil {
 			t.Errorf("%s: matched, want refusal", c.name)
 		}
-	}
-}
-
-func TestBatchIdentityMatches(t *testing.T) {
-	known := BatchTarget{Path: "a", Size: 10, Mtime: 5, State: BatchActive}
-	if !BatchIdentityMatches(known, 10, 5) {
-		t.Error("identical identity did not match")
-	}
-	if BatchIdentityMatches(known, 11, 5) || BatchIdentityMatches(known, 10, 6) {
-		t.Error("changed identity matched")
-	}
-	unknown := BatchTarget{Path: "a", Size: -1, State: BatchActive}
-	if BatchIdentityMatches(unknown, -1, 0) {
-		t.Error("unknown identity matched")
 	}
 }
 
