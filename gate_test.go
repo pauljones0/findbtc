@@ -631,6 +631,22 @@ func TestTokenlistForeignJSONVerbatim(t *testing.T) {
 	}
 }
 
+// Resuming prints the resume position, not just the byte offset: the
+// owner sees where in the target the scan continues.
+func TestResumePrintsPosition(t *testing.T) {
+	dir := t.TempDir()
+	target := writeGateFile(t, dir, "target.bin", strings.Repeat("x", 100))
+	ckpt := writeGateFile(t, dir, "ckpt.json",
+		fmt.Sprintf("{\"path\":%q,\"offset\":41,\"updated\":\"2026-01-01T00:00:00Z\"}\n", target))
+	_, stderr, exit := runTestBinary(t, "-checkpoint", ckpt, "-resume", target)
+	if exit != 0 {
+		t.Fatalf("resume exit %d (stderr: %s)", exit, firstLine(stderr))
+	}
+	if !strings.Contains(stderr, "at byte offset 41 (continuing at 41%)") {
+		t.Errorf("resume must print byte offset and percent, stderr:\n%s", stderr)
+	}
+}
+
 // The doc-commands contract (Goal 33): every ```sh line in
 // docs/PASSWORD_RECOVERY.md must be shaped to run verbatim under
 // scripts/password-handoff.sh (same fence convention, known lead tool,

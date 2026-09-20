@@ -228,7 +228,13 @@ func main() {
 				os.Exit(1)
 			}
 			start = cp.Offset
-			fmt.Fprintf(os.Stderr, "[main] Resuming %s at byte offset %d\n", path, start)
+			msg := fmt.Sprintf("[main] Resuming %s at byte offset %d", path, start)
+			// Percent needs a known size; without one the byte
+			// offset stands alone (unchanged legacy shape).
+			if fi, serr := os.Stat(path); serr == nil && fi.Size() > 0 && start >= 0 && start <= fi.Size() {
+				msg += fmt.Sprintf(" (continuing at %d%%)", start*100/fi.Size())
+			}
+			fmt.Fprintln(os.Stderr, msg)
 		}
 	}
 
@@ -1060,22 +1066,47 @@ func watchInputKeys(buf []byte, path string) ([]string, bool) {
 
 const PROGRESS_REPORT_INTERVAL = 10
 
+// progressWarmup is how long a target scans before its progress lines
+// show throughput and ETA: sub-second averages are noise (0.0MB/s,
+// wild ETAs), so early lines show percent/bytes only.
+const progressWarmup = 5 * time.Second
+
 type progressReporter struct {
-	lastReport int64
-	interval   int64
-	started    bool
-	startTime  time.Time
-	startBytes int64
+	lastReport  int64
+	interval    int64
+	started     bool
+	startTime   time.Time
+	startBytes  int64
+	lastTarget  string
+	lastScanned int64
+	lastTotal   int64
+	now         func() time.Time
 }
 
 func newProgressReporter() *progressReporter {
-	return &progressReporter{interval: PROGRESS_REPORT_INTERVAL}
+	return &progressReporter{interval: PROGRESS_REPORT_INTERVAL, now: time.Now}
 }
 
 func (p *progressReporter) onProgress(pg detector.ProgressInfo) {
 	now := time.Now()
+	if p.now != nil {
+		now = p.now()
+	}
 	if !p.started {
 		p.started = true
+		p.startTime = now
+		p.startBytes = pg.ScannedBytes
+	}
+	// A new target restarts the baseline: walk reuses one reporter
+	// across files, and same-size (or unknown-size) targets share a
+	// TotalBytes, so identity and counter resets — not the total
+	// alone — mark the switch. Without this a new file inherits the
+	// old file's timing and prints garbage like negative rates.
+	retargeted := pg.CurrentTarget != p.lastTarget ||
+		pg.ScannedBytes < p.lastScanned ||
+		pg.TotalBytes != p.lastTotal
+	p.lastTarget, p.lastScanned, p.lastTotal = pg.CurrentTarget, pg.ScannedBytes, pg.TotalBytes
+	if retargeted {
 		p.startTime = now
 		p.startBytes = pg.ScannedBytes
 	}
@@ -1088,12 +1119,18 @@ func (p *progressReporter) onProgress(pg detector.ProgressInfo) {
 
 		rate := ""
 		eta := ""
-		if elapsed := now.Sub(p.startTime).Seconds(); elapsed > 0 {
-			mbps := float64(pg.ScannedBytes-p.startBytes) / elapsed / (1024 * 1024)
+		if elapsed := now.Sub(p.startTime); elapsed >= progressWarmup {
+			mbps := float64(pg.ScannedBytes-p.startBytes) / elapsed.Seconds() / (1024 * 1024)
 			rate = fmt.Sprintf(" %.1fMB/s", mbps)
+			// Honest ETA: the cumulative average, which rises when
+			// the scan slows. Clamping it down would print a time
+			// the reporter's own rate contradicts.
 			if pg.TotalBytes > 0 && mbps > 0 {
-				remaining := float64(pg.TotalBytes-pg.ScannedBytes) / (mbps * 1024 * 1024)
-				eta = fmt.Sprintf(" ETA %s", formatETA(time.Duration(remaining)*time.Second))
+				remaining := time.Duration(float64(pg.TotalBytes-pg.ScannedBytes)/(mbps*1024*1024)) * time.Second
+				if remaining < 0 {
+					remaining = 0
+				}
+				eta = fmt.Sprintf(" ETA %s", formatETA(remaining))
 			}
 		}
 

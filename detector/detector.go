@@ -392,6 +392,13 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 			return nil // journal says the list already completed
 		}
 		startIdx, startOff = idx, off
+		// A missing journal already announced a fresh start inside
+		// readRangeResume; only a real journal point gets a
+		// resume-position line.
+		if off >= 0 {
+			opts.logf("[checkpoint] Resuming %s at range %d of %d%s\n",
+				path, resumeDisplayIndex(ranges, idx, off)+1, len(ranges), rangeResumePercent(ranges, idx, off))
+		}
 	}
 	for i := startIdx; i < len(ranges); i++ {
 		r := ranges[i]
@@ -416,6 +423,46 @@ func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetec
 		}
 	}
 	return nil
+}
+
+// resumeDisplayIndex names the range where work resumes for a journal
+// point: a point exactly on a boundary belongs to the next range with
+// nonzero remainder (the scan loop skips the rest), not the finished
+// one. A point at the very end of the list names the last range.
+func resumeDisplayIndex(ranges []FSExtent, idx int, off int64) int {
+	// Same skip condition the scan loop below uses: a range with no
+	// remainder contributes nothing, so the ordinal advances past it.
+	didx := idx
+	for didx < len(ranges) && off >= ranges[didx].Start+ranges[didx].Len {
+		didx++
+	}
+	if didx >= len(ranges) {
+		return len(ranges) - 1
+	}
+	return didx
+}
+
+// rangeResumePercent renders " (continuing at NN%)" for a range resume
+// point, or "" when the list totals zero bytes (no meaningful
+// denominator). Bytes before the journal point count as done.
+func rangeResumePercent(ranges []FSExtent, idx int, off int64) string {
+	var total, done int64
+	for i, r := range ranges {
+		if r.Len <= 0 {
+			continue
+		}
+		total += r.Len
+		switch {
+		case i < idx:
+			done += r.Len
+		case i == idx && off > r.Start:
+			done += off - r.Start
+		}
+	}
+	if total <= 0 || done < 0 || done > total {
+		return ""
+	}
+	return fmt.Sprintf(" (continuing at %d%%)", done*100/total)
 }
 
 // rewindOffset backs a resume point to its range's block grid at or before

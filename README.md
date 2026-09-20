@@ -94,6 +94,22 @@ to stderr, so `-json` output stays parseable. Exit codes are a contract:
 
 A bad nested archive inside a readable root stays a warning (exit 0):
 only the root target can fail the run.
+
+Progress lines print to stderr at most every 10 seconds (never to
+stdout, so pipes stay clean). Known-size targets show percent,
+throughput, and an ETA once past a 5-second warmup; the ETA follows
+the measured average, so it rises when the scan slows rather than
+holding a stale low figure. Unknown-size targets show megabytes
+scanned:
+
+    [41.27% 12.4MB/s ETA 3m12s]
+    [87mb/??mb 9.8MB/s]
+
+Throughput is per-target (a `-walk` line covers the file in flight).
+`-resume` announces its position the same way:
+
+    [main] Resuming /dev/sda at byte offset 123456 (continuing at 41%)
+
 The line shape is a versioned
 contract: [schema/hits-v1.json](schema/hits-v1.json), documented in
 [docs/HITS_SCHEMA.md](docs/HITS_SCHEMA.md). Each carved hit lands in

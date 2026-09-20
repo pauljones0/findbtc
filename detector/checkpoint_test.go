@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -141,6 +142,80 @@ func TestRangeResumeKillBetweenRanges(t *testing.T) {
 	after := scanRangeList(t, path, ranges, Options{CheckpointPath: ckpt, Resume: true})
 	if ok, why := detListEqual(append(before, after...), full); !ok {
 		t.Errorf("between-ranges resume differs: %s", why)
+	}
+}
+
+// A range resume announces its position: range index and percent of
+// the list already behind the journal point.
+func TestRangeResumeLogsPosition(t *testing.T) {
+	path, ranges, O := rangeResumeFixture(t)
+	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
+	writeCheckpointRange(nil, ckpt, path, ranges, 1, O)
+	var log bytes.Buffer
+	scanRangeList(t, path, ranges, Options{CheckpointPath: ckpt, Resume: true, Log: &log})
+	// 1 MiB range + 1 MiB into range 1 of 4 MiB total = 50%.
+	if want := "at range 2 of 3 (continuing at 50%)"; !strings.Contains(log.String(), want) {
+		t.Errorf("resume log must contain %q, got:\n%s", want, log.String())
+	}
+}
+
+func TestRangeResumePercent(t *testing.T) {
+	ranges := []FSExtent{{Start: 0, Len: 100}, {Start: 100, Len: 100}, {Start: 200, Len: 100}}
+	cases := []struct {
+		idx  int
+		off  int64
+		want string
+	}{
+		{0, 0, " (continuing at 0%)"},
+		{1, 150, " (continuing at 50%)"},
+		{2, 300, " (continuing at 100%)"},
+	}
+	for _, c := range cases {
+		if got := rangeResumePercent(ranges, c.idx, c.off); got != c.want {
+			t.Errorf("rangeResumePercent(idx=%d, off=%d) = %q, want %q", c.idx, c.off, got, c.want)
+		}
+	}
+	if got := rangeResumePercent(nil, 0, 0); got != "" {
+		t.Errorf("empty list must yield no percent, got %q", got)
+	}
+	if got := rangeResumePercent([]FSExtent{{Start: 0, Len: 0}}, 0, 0); got != "" {
+		t.Errorf("zero-byte list must yield no percent, got %q", got)
+	}
+}
+
+// The announced range is where work resumes: a boundary journal point
+// names the next range with remainder, never the finished one.
+func TestResumeDisplayIndex(t *testing.T) {
+	ranges := []FSExtent{{Start: 0, Len: 100}, {Start: 100, Len: 0}, {Start: 100, Len: 100}}
+	cases := []struct {
+		idx  int
+		off  int64
+		want int
+	}{
+		{0, 50, 0},  // mid-range: unchanged
+		{0, 100, 2}, // boundary: skips the zero-len hole too
+		{1, 100, 2}, // hole itself: next real range
+		{2, 200, 2}, // list end: clamps to the last range
+		{2, 150, 2}, // mid-range: unchanged
+		{0, 0, 0},   // list start: first range
+	}
+	for _, c := range cases {
+		if got := resumeDisplayIndex(ranges, c.idx, c.off); got != c.want {
+			t.Errorf("resumeDisplayIndex(idx=%d, off=%d) = %d, want %d", c.idx, c.off, got, c.want)
+		}
+	}
+}
+
+// End-to-end: a kill-on-the-boundary journal announces the range
+// where the scan actually continues.
+func TestRangeResumeLogsPositionAtBoundary(t *testing.T) {
+	path, ranges, _ := rangeResumeFixture(t)
+	ckpt := filepath.Join(t.TempDir(), "ckpt.json")
+	writeCheckpointRange(nil, ckpt, path, ranges, 0, ranges[0].Start+ranges[0].Len)
+	var log bytes.Buffer
+	scanRangeList(t, path, ranges, Options{CheckpointPath: ckpt, Resume: true, Log: &log})
+	if want := "at range 2 of 3 (continuing at 25%)"; !strings.Contains(log.String(), want) {
+		t.Errorf("boundary resume must announce the next range, got:\n%s", log.String())
 	}
 }
 

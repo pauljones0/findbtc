@@ -39,8 +39,13 @@ func TestFormatETA(t *testing.T) {
 	}
 }
 
-// Progress lines carry throughput and ETA once two samples exist.
-func TestProgressReporterShowsRateAndETA(t *testing.T) {
+// captureProgress runs samples through a reporter with a fake clock,
+// advancing now to each sample's time. interval -1 reports every sample.
+func captureProgress(t *testing.T, at []time.Time, samples []detector.ProgressInfo) string {
+	t.Helper()
+	if len(at) != len(samples) {
+		t.Fatalf("times/samples mismatch: %d vs %d", len(at), len(samples))
+	}
 	old := os.Stderr
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -49,22 +54,133 @@ func TestProgressReporterShowsRateAndETA(t *testing.T) {
 	os.Stderr = w
 	defer func() { os.Stderr = old }()
 
-	p := &progressReporter{interval: -1} // report every sample
-	p.onProgress(detector.ProgressInfo{CurrentTarget: "d", ScannedBytes: 100 << 20, TotalBytes: 1000 << 20})
-	time.Sleep(10 * time.Millisecond)
-	p.onProgress(detector.ProgressInfo{CurrentTarget: "d", ScannedBytes: 200 << 20, TotalBytes: 1000 << 20})
+	now := at[0]
+	p := &progressReporter{interval: -1, now: func() time.Time { return now }}
+	for i, s := range samples {
+		now = at[i]
+		p.onProgress(s)
+	}
 	w.Close()
 	os.Stderr = old
-
 	raw, err := io.ReadAll(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := string(raw)
+	return string(raw)
+}
+
+// Progress lines carry throughput and ETA once past the warmup window.
+func TestProgressReporterShowsRateAndETA(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	out := captureProgress(t, []time.Time{t0, t0.Add(10 * time.Second)}, []detector.ProgressInfo{
+		{CurrentTarget: "d", ScannedBytes: 100 << 20, TotalBytes: 1000 << 20},
+		{CurrentTarget: "d", ScannedBytes: 200 << 20, TotalBytes: 1000 << 20},
+	})
 	for _, want := range []string{"%", "MB/s", "ETA"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected progress output to contain %q, got:\n%s", want, out)
 		}
+	}
+	if !strings.Contains(out, "10.0MB/s") {
+		t.Errorf("100MB in 10s must read 10.0MB/s, got:\n%s", out)
+	}
+}
+
+// Before the warmup window elapses, lines show percent/bytes only —
+// sub-second averages would print noise like 0.0MB/s with a wild ETA.
+func TestProgressReporterWarmup(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	out := captureProgress(t, []time.Time{t0, t0.Add(time.Second)}, []detector.ProgressInfo{
+		{CurrentTarget: "d", ScannedBytes: 100 << 20, TotalBytes: 1000 << 20},
+		{CurrentTarget: "d", ScannedBytes: 200 << 20, TotalBytes: 1000 << 20},
+	})
+	if !strings.Contains(out, "%") {
+		t.Fatalf("warmup lines must still show percent, got:\n%s", out)
+	}
+	for _, banned := range []string{"MB/s", "ETA"} {
+		if strings.Contains(out, banned) {
+			t.Errorf("warmup lines must not show %q, got:\n%s", banned, out)
+		}
+	}
+}
+
+// A slowing scan shows a RISING ETA: the estimate follows the measured
+// average, and holding an old low figure would contradict the line's
+// own rate. (An earlier clamp blessed the stale figure; the goal's
+// progress honesty forbids it.)
+func TestProgressReporterETAHonest(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	out := captureProgress(t,
+		[]time.Time{t0, t0.Add(10 * time.Second), t0.Add(100 * time.Second)},
+		[]detector.ProgressInfo{
+			{CurrentTarget: "d", ScannedBytes: 0, TotalBytes: 1000 << 20},
+			{CurrentTarget: "d", ScannedBytes: 500 << 20, TotalBytes: 1000 << 20},
+			{CurrentTarget: "d", ScannedBytes: 510 << 20, TotalBytes: 1000 << 20},
+		})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 lines, got %d:\n%s", len(lines), out)
+	}
+	// Fast start: 500MB in 10s → 500MB left at 50MB/s → ETA 10s.
+	if !strings.Contains(lines[1], "ETA 10s") {
+		t.Errorf("line 2 must show ETA 10s, got: %s", lines[1])
+	}
+	// Stall after: 490MB left at the measured 5.1MB/s → ~96s, shown
+	// honestly instead of the stale 10s.
+	if !strings.Contains(lines[2], "ETA 1m36s") {
+		t.Errorf("line 3 must show the risen ETA 1m36s, got: %s", lines[2])
+	}
+}
+
+// A new target restarts the baseline: walk reuses one reporter across
+// files, and the next file must not inherit timing. Identity and
+// counter resets mark the switch — not the total alone, since
+// same-size and unknown-size targets share a TotalBytes.
+func TestProgressReporterRetarget(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	out := captureProgress(t,
+		[]time.Time{t0, t0.Add(10 * time.Second), t0.Add(20 * time.Second), t0.Add(30 * time.Second)},
+		[]detector.ProgressInfo{
+			{CurrentTarget: "first.img", ScannedBytes: 100 << 20, TotalBytes: 1000 << 20},
+			{CurrentTarget: "first.img", ScannedBytes: 200 << 20, TotalBytes: 1000 << 20},
+			// Same total, new target: without identity tracking
+			// this line inherits first.img's baseline and prints
+			// a negative rate (-4.5MB/s).
+			{CurrentTarget: "second.img", ScannedBytes: 10 << 20, TotalBytes: 1000 << 20},
+			// Unknown-size targets all share total 0: identity
+			// still restarts the baseline.
+			{CurrentTarget: "third.img", ScannedBytes: 5 << 20, TotalBytes: 0},
+		})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("want 4 lines, got %d:\n%s", len(lines), out)
+	}
+	// Retarget restarts warmup: percent/bytes only, no inherited rate.
+	if lines[2] != "[1.00%]" {
+		t.Errorf("same-size retarget must print bare percent, got: %s", lines[2])
+	}
+	if lines[3] != "[5mb/??mb]" {
+		t.Errorf("unknown-size retarget must print bare megabytes, got: %s", lines[3])
+	}
+}
+
+// A counter reset within one target also restarts the baseline:
+// bytes only ever flow forward inside a scan.
+func TestProgressReporterCounterReset(t *testing.T) {
+	t0 := time.Unix(1700000000, 0)
+	out := captureProgress(t,
+		[]time.Time{t0, t0.Add(10 * time.Second), t0.Add(20 * time.Second)},
+		[]detector.ProgressInfo{
+			{CurrentTarget: "d", ScannedBytes: 100 << 20, TotalBytes: 1000 << 20},
+			{CurrentTarget: "d", ScannedBytes: 200 << 20, TotalBytes: 1000 << 20},
+			{CurrentTarget: "d", ScannedBytes: 10 << 20, TotalBytes: 1000 << 20},
+		})
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("want 3 lines, got %d:\n%s", len(lines), out)
+	}
+	if lines[2] != "[1.00%]" {
+		t.Errorf("counter reset must restart warmup, got: %s", lines[2])
 	}
 }
 

@@ -1036,12 +1036,36 @@ no rate or remaining time; users cannot tell "slow" from "hung"
 perceived reliability.
 
 **Completely solved when:**
-- [ ] Stderr progress gains throughput + ETA (bytes/sec,
-      remaining) after a warmup window: stable (≤2 updates/sec,
-      monotonic remaining), documented line shape, still
-      parseable.
-- [ ] `-checkpoint` prints resume position on `-resume`
+- [x] Stderr progress gains throughput + ETA (bytes/sec,
+      remaining) after a warmup window: stable (≤2 updates/sec;
+      bytes/percent monotonic within a scan), honest ETA that
+      rises with slowdowns (never a clamped stale figure),
+      documented line shape, still parseable.
+- [x] `-checkpoint` prints resume position on `-resume`
       ("continuing at 41%").
+
+Decision record (Goal 34): the reporter already printed rate+ETA;
+G34 made it honest — 5 s warmup (early lines show percent/bytes
+only), per-target baselines restarting on identity, counter
+resets, or total change (same-size and unknown-size targets share
+a total, so the total alone under-determines the switch), and a
+cumulative-average ETA with no clamp. Design correction during
+review: a first attempt clamped the ETA down ("monotonic
+remaining") and printed times its own rate contradicted (5.1MB/s
+with ETA 10s for a 96 s remainder) — the supervisor's independent
+overlay reproved both that and the same-size negative rate
+(`-4.5MB/s`); the clamp was removed and the goal text corrected to
+honest-rising ETA. Resume prints `(continuing at NN%)` on the
+single-target path (byte-only fallback when size is unknown) and
+`at range N of M (continuing at NN%)` on range scans, with the
+ordinal naming the range where work resumes (boundary journals
+advance past zero-remainder ranges, sharing the scan loop's skip
+condition). Line shapes documented in README (stderr-only, 10 s
+cadence, per-target rates). Evidence: fake-clock golden tests
+(rate/ETA values, warmup, honest rise, retarget, counter reset),
+real-binary resume tests, supervisor overlay exit 0 in both
+directions, adversarial review FAIL:1 minor (boundary ordinal) →
+fixed with unit + end-to-end tests, full suite SUITE_EXIT=0.
 
 **Execute:**
 1. Add rate/ETA to the progress printer with a fake-clock-safe
