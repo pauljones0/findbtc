@@ -16,8 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: packaging pins match release checksums
-        run: sh scripts/verify-packaging-pins.sh
+      - name: packaging pins bind release checksums
+        run: python3 scripts/verify-packaging-pins.py
+      - name: pin verifier self-test (offline fixtures)
+        run: python3 scripts/verify-packaging-pins.py --self-test
       - name: goreleaser config valid
         uses: goreleaser/goreleaser-action@v6
         with:

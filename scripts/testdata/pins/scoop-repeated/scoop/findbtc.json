@@ -1,0 +1,30 @@
+{
+    "version": "9.9.9",
+    "description": "Find BTC wallets by scanning raw block devices",
+    "homepage": "https://github.com/pauljones0/findbtc",
+    "license": "GPL-3.0-or-later",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/pauljones0/findbtc/releases/download/v9.9.9/findbtc_9.9.9_windows_amd64.zip",
+            "hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        },
+        "arm64": {
+            "url": "https://github.com/pauljones0/findbtc/releases/download/v9.9.9/findbtc_9.9.9_windows_arm64.zip",
+            "hash": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        }
+    },
+    "bin": "findbtc.exe",
+    "checkver": {
+        "github": "https://github.com/pauljones0/findbtc"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/pauljones0/findbtc/releases/download/v$version/findbtc_$version_windows_amd64.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/pauljones0/findbtc/releases/download/v$version/findbtc_$version_windows_arm64.zip"
+            }
+        }
+    }
+}

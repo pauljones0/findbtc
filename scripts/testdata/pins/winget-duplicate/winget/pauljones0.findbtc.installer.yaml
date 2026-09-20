@@ -1,0 +1,21 @@
+PackageIdentifier: pauljones0.findbtc
+PackageVersion: 9.9.9
+Platform:
+- Windows.Desktop
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: findbtc.exe
+  PortableCommandAlias: findbtc
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/pauljones0/findbtc/releases/download/v9.9.9/findbtc_9.9.9_windows_amd64.zip
+  InstallerSha256: EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+- Architecture: x64
+  InstallerUrl: https://github.com/pauljones0/findbtc/releases/download/v9.9.9/findbtc_9.9.9_windows_amd64.zip
+  InstallerSha256: EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+- Architecture: arm64
+  InstallerUrl: https://github.com/pauljones0/findbtc/releases/download/v9.9.9/findbtc_9.9.9_windows_arm64.zip
+  InstallerSha256: FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF
+ManifestType: installer
+ManifestVersion: 1.6.0

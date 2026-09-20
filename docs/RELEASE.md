@@ -78,8 +78,10 @@ published to releases; treat them as untrusted for casework.
 The Homebrew tap ([homebrew-findbtc](https://github.com/pauljones0/homebrew-findbtc))
 and Scoop bucket ([scoop-findbtc](https://github.com/pauljones0/scoop-findbtc))
 pin immutable release assets; the bootstrap copies live under
-`packaging/` and `scripts/verify-packaging-pins.sh` fails CI if any
-pin drifts from the release's `checksums.txt`.
+`packaging/` and `scripts/verify-packaging-pins.py` fails CI if any
+entry's URL, architecture, version, or hash stops matching the
+release's `checksums.txt` (its `--self-test` proves the binding
+checks against offline fixtures, so swapped hashes cannot pass).
 
 - Tap: GoReleaser's `homebrew_casks` block rewrites the cask per
   release, but `skip_upload` stays true until cross-repo push
