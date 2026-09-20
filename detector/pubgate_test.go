@@ -103,6 +103,107 @@ func TestPubGateTripsEndToEnd(t *testing.T) {
 // Cap zero admits nothing: tryPublish refuses before any send,
 // so the congested outcome is fully deterministic — zero
 // detections plus the incomplete-coverage error.
+// Cover keys discriminate alternate views of the same bytes: a
+// stored member carrying a fake central directory can derive the
+// same archive start and member index with a different size (or
+// overlapping local headers with different lengths). Same
+// Describe, different bytes must not defer — only identical keys
+// (same bytes) may.
+// The banking gate surface is nil-safe throughout: direct
+// unit-test drivers with no pipeline must neither crash nor
+// record anything.
+func TestPubGateBankingNilSafe(t *testing.T) {
+	var g *pubGate
+	g.seedCovered([]string{"a"})
+	g.bankCovered("a")
+	if g.isCovered("a") {
+		t.Error("nil gate reports coverage")
+	}
+	if g.snapshotCovered() != nil {
+		t.Error("nil gate snapshots coverage")
+	}
+	src := &fileScanTarget{path: "x"}
+	m := &zipScanTarget{source: src, fileIndex: 1, zipSize: 9}
+	ch := make(chan scanTarget, 1)
+	if !gatePublish(g, ch, m) {
+		t.Error("nil gate must admit (legacy blocking send)")
+	}
+	<-ch
+	if !gatePublishFlush(g, ch, m) {
+		t.Error("nil flush gate must admit")
+	}
+	<-ch
+	g.notePublish(m, false)
+	g.notePolicySkip(src)
+}
+
+// A policy refusal poisons the banked parent chain without
+// counting a skip: the filed set must drop the parent so the
+// next run re-reads it and re-applies policy.
+func TestPubGatePolicySkipPoisonsFiled(t *testing.T) {
+	g := newPubGate(io.Discard)
+	root := &fileScanTarget{path: "r"}
+	mid := &zipScanTarget{source: root, fileIndex: 0, zipSize: 100}
+	ch := make(chan scanTarget, 2)
+	if !gatePublish(g, ch, mid) {
+		t.Fatal("parent publish refused")
+	}
+	<-ch
+	g.bankCovered(coverKeyOf(mid))
+	if got := g.snapshotCovered(); len(got) != 1 {
+		t.Fatalf("filed before policy skip = %v, want [parent]", got)
+	}
+	g.notePolicySkip(mid)
+	if got := g.snapshotCovered(); len(got) != 0 {
+		t.Fatalf("filed after policy skip = %v, want empty (parent re-read)", got)
+	}
+	if n := g.skippedCount(); n != 0 {
+		t.Fatalf("skipped = %d, want 0 (policy is not congestion)", n)
+	}
+}
+
+func TestPubGateCoverKeyDiscriminatesViews(t *testing.T) {
+	src := &fileScanTarget{path: "view.zip"}
+	mkZip := func(size int64) *zipScanTarget {
+		return &zipScanTarget{source: src, zipOffset: 0, fileIndex: 3, zipSize: size}
+	}
+	mkEntry := func(compSize int64, method uint16) *zipEntryTarget {
+		return &zipEntryTarget{source: src, name: "m.dat", dataOff: 100, compSize: compSize, method: method}
+	}
+	if coverKeyOf(mkZip(1000)) == coverKeyOf(mkZip(900)) {
+		t.Error("zip cover keys collide across archive sizes")
+	}
+	if coverKeyOf(mkEntry(50, 8)) == coverKeyOf(mkEntry(40, 8)) {
+		t.Error("entry cover keys collide across comp sizes")
+	}
+	if coverKeyOf(mkEntry(50, 8)) == coverKeyOf(mkEntry(50, 0)) {
+		t.Error("entry cover keys collide across methods")
+	}
+	if coverKeyOf(mkZip(1000)) != coverKeyOf(mkZip(1000)) {
+		t.Error("identical zip members key differently")
+	}
+	// End to end at the gate: banking one view must not defer
+	// the other, but must defer itself.
+	g := newPubGate(io.Discard)
+	g.bankCovered(coverKeyOf(mkZip(1000)))
+	ch := make(chan scanTarget, 4)
+	if !gatePublish(g, ch, mkZip(900)) {
+		t.Error("different-size view deferred by banked key (would lose bytes)")
+	}
+	<-ch
+	if gatePublish(g, ch, mkZip(1000)) {
+		t.Error("identical view admitted despite banked key (would duplicate)")
+	}
+	g.bankCovered(coverKeyOf(mkEntry(50, 8)))
+	if !gatePublishFlush(g, ch, mkEntry(40, 8)) {
+		t.Error("different-length recovery entry deferred by banked key")
+	}
+	<-ch
+	if gatePublishFlush(g, ch, mkEntry(50, 8)) {
+		t.Error("identical recovery entry admitted despite banked key")
+	}
+}
+
 func TestPubGateCapZeroAdmitsNothing(t *testing.T) {
 	old := maxOutstandingPubs
 	maxOutstandingPubs = 0

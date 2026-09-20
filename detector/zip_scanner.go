@@ -203,6 +203,7 @@ func scanZipFiles(ctx context.Context, in, out chan *Block, scanTargets chan sca
 func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTargets chan scanTarget, published *[]zipRange, log io.Writer, gate *pubGate) int {
 	if source.Depth()+1 > maxArchiveDepth {
 		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
+		gate.notePolicySkip(source)
 		return 0
 	}
 	startOffset, size, err := readZipFileSize(source, endOfCentralDirectoryOffset)
@@ -235,6 +236,7 @@ func scanZipFile(source scanTarget, endOfCentralDirectoryOffset int64, scanTarge
 		if fileInfo.UncompressedSize64 > uint64(maxZipMemberBytes) {
 			logLinef(log, "[scan] Skipping %d-byte member %q: over the %d-byte inflation cap\n",
 				fileInfo.UncompressedSize64, fileInfo.Name, maxZipMemberBytes)
+			gate.notePolicySkip(source)
 			continue
 		}
 		if gatePublish(gate, scanTargets, &zipScanTarget{

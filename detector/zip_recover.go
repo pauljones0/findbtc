@@ -130,6 +130,7 @@ func flushZipCandidates(pending *[]zipCandidate, published *[]zipRange, scanTarg
 	for _, c := range *pending {
 		if c.source.Depth()+1 > maxArchiveDepth {
 			logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, c.source.Describe())
+			gate.notePolicySkip(c.source)
 			continue
 		}
 		covered := false

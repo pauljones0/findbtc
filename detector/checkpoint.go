@@ -29,12 +29,21 @@ type Checkpoint struct {
 	Targets []BatchTarget `json:"targets,omitempty"`
 	Run     *BatchRun     `json:"run,omitempty"`
 	// Covered banks nested targets fully read in congested runs
-	// (G42b): each entry is the member's Describe() string, stable
-	// across resume attempts of the same input. A retry defers
+	// (G42b): each entry is the member's cover key (Describe plus
+	// size discriminators), stable across resume attempts of the
+	// same input. A retry defers
 	// re-publishing banked members, so same-cap attempts converge
 	// instead of replaying the same admitted prefix. Completion
 	// drops the list (it subsumes it). Opaque to old binaries.
 	Covered []string `json:"covered,omitempty"`
+	// Size and Mtime identify the bytes the journaled progress —
+	// including Covered — was produced from. A retry seeds
+	// covered members only on identity match; replaced bytes
+	// re-read everything (a same-path swap keeps member keys but
+	// changes their content). Zero/absent on journals from older
+	// binaries, which never match and simply re-cover.
+	Size  int64 `json:"size,omitempty"`
+	Mtime int64 `json:"mtime,omitempty"`
 }
 
 // Batch target states: pending (never started), active (in flight,
@@ -90,14 +99,28 @@ const checkpointBlockInterval = 256
 // writeCheckpoint atomically records that path is scanned up to offset.
 // Journal failures warn; they must never fail the scan itself.
 func writeCheckpoint(log io.Writer, file, path string, offset int64, covered []string) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered})
+	size, mtime := BatchIdentity(path)
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Covered: covered, Size: size, Mtime: mtime})
 }
 
 // writeCheckpointRange atomically records range-scan progress: ranges is
 // the full range list (for resume validation), index the range in flight,
 // offset the absolute file offset scanned up to within it.
 func writeCheckpointRange(log io.Writer, file, path string, ranges []FSExtent, index int, offset int64, covered []string) {
-	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered})
+	size, mtime := BatchIdentity(path)
+	writeCheckpointData(log, file, Checkpoint{Path: path, Offset: offset, Updated: time.Now().UTC(), Ranges: ranges, RangeIndex: index, Covered: covered, Size: size, Mtime: mtime})
+}
+
+// journalIdentityMatches reports whether a filed journal still
+// describes the bytes now at path: both size and mtime must match,
+// and unknown/zero identities never match (old journals simply
+// re-cover their banked members).
+func journalIdentityMatches(cp Checkpoint, path string) bool {
+	if cp.Size < 0 || cp.Mtime == 0 {
+		return false
+	}
+	size, mtime := BatchIdentity(path)
+	return cp.Size == size && cp.Mtime == mtime
 }
 
 func writeCheckpointData(log io.Writer, file string, cp Checkpoint) {

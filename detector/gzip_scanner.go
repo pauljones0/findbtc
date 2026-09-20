@@ -146,6 +146,7 @@ func gzipHeaderPlausible(tail []byte) bool {
 func scanGzipFile(source scanTarget, gzipOffset int64, scanTargets chan scanTarget, log io.Writer, gate *pubGate) int {
 	if source.Depth()+1 > maxArchiveDepth {
 		logLinef(log, "[scan] Skipping archive nested past depth %d in %s\n", maxArchiveDepth, source.Describe())
+		gate.notePolicySkip(source)
 		return 0
 	}
 	// Sanity check

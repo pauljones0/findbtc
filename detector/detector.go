@@ -692,7 +692,7 @@ type pubGate struct {
 	warned      atomic.Bool
 	log         io.Writer
 	// covered banks nested targets fully read this run (keyed by
-	// Describe(), stable across resumes of the same input), seeded
+	// coverKeyOf(), stable across resumes of the same input), seeded
 	// from the journal at run start. Publishers defer banked
 	// members without consuming a slot, so congested retries
 	// converge instead of replaying the same admitted prefix.
@@ -777,17 +777,41 @@ func (g *pubGate) snapshotCovered() []string {
 	return out
 }
 
+// coverKeyOf returns the banking identity for a target: the stable
+// Describe() string plus size discriminators that distinguish
+// alternate views of the same bytes. A stored member can carry a
+// fake central directory deriving the same archive start with a
+// different size (or overlapping local headers with different
+// lengths); Describe() alone would collide those keys and let a
+// filed member defer bytes never read. Same key therefore implies
+// same member bytes (given the run's source bytes, pinned across
+// runs by journal identity gating); same bytes re-read would only
+// duplicate hits, so deferral stays sound. Display strings are
+// untouched — this key never leaves the gate and the journal.
+// Journals filed by older binaries carry plain Describes, which
+// simply never match and re-cover (the safe direction).
+func coverKeyOf(t scanTarget) string {
+	switch v := t.(type) {
+	case *zipScanTarget:
+		return fmt.Sprintf("%s|zipsize=%d", v.Describe(), v.zipSize)
+	case *zipEntryTarget:
+		return fmt.Sprintf("%s|comp=%d/m=%d", v.Describe(), v.compSize, v.method)
+	default:
+		return t.Describe()
+	}
+}
+
 // parentKeyOf returns the publishing parent's key for a nested
 // target, or false for roots. The concrete nested types all carry
 // their source; caseKind in caselog.go switches the same way.
 func parentKeyOf(t scanTarget) (string, bool) {
 	switch v := t.(type) {
 	case *zipScanTarget:
-		return v.source.Describe(), true
+		return coverKeyOf(v.source), true
 	case *zipEntryTarget:
-		return v.source.Describe(), true
+		return coverKeyOf(v.source), true
 	case *gzipScanTarget:
-		return v.source.Describe(), true
+		return coverKeyOf(v.source), true
 	default:
 		return "", false
 	}
@@ -809,7 +833,7 @@ func (g *pubGate) notePublish(t scanTarget, admitted bool) {
 	if g.parentOf == nil {
 		g.parentOf = make(map[string]string)
 	}
-	g.parentOf[t.Describe()] = pk
+	g.parentOf[coverKeyOf(t)] = pk
 	if admitted {
 		return
 	}
@@ -817,6 +841,27 @@ func (g *pubGate) notePublish(t scanTarget, admitted bool) {
 		g.poisoned = make(map[string]bool)
 	}
 	for p := pk; p != ""; {
+		g.poisoned[p] = true
+		p = g.parentOf[p]
+	}
+}
+
+// notePolicySkip poisons the parent chain for a policy refusal
+// (depth cap, inflation cap) without counting a skip: the child
+// was refused by policy rather than congestion, but a banked
+// parent must still not claim its subtree complete — re-reading
+// next run re-applies the deterministic policy instead of
+// trusting a filed claim over skipped members. Nil-safe.
+func (g *pubGate) notePolicySkip(parent scanTarget) {
+	if g == nil || parent == nil {
+		return
+	}
+	g.coverMu.Lock()
+	defer g.coverMu.Unlock()
+	if g.poisoned == nil {
+		g.poisoned = make(map[string]bool)
+	}
+	for p := coverKeyOf(parent); p != ""; {
 		g.poisoned[p] = true
 		p = g.parentOf[p]
 	}
@@ -874,7 +919,7 @@ func (g *pubGate) skippedCount() int64 {
 // counted, so only uncovered refusals become skips. Callers must
 // treat false as unpublished (no EOF accounting either way).
 func gatePublish(g *pubGate, ch chan scanTarget, t scanTarget) bool {
-	if g.isCovered(t.Describe()) {
+	if g.isCovered(coverKeyOf(t)) {
 		return false
 	}
 	if !g.tryPublish() {
@@ -892,7 +937,7 @@ func gatePublish(g *pubGate, ch chan scanTarget, t scanTarget) bool {
 // concerns pre-frontier bytes and the error path must rewind the
 // journal to the run start instead of trusting a frozen point.
 func gatePublishFlush(g *pubGate, ch chan scanTarget, t scanTarget) bool {
-	if g.isCovered(t.Describe()) {
+	if g.isCovered(coverKeyOf(t)) {
 		return false
 	}
 	if !g.tryPublish() {
@@ -944,9 +989,13 @@ type journalCtl struct {
 // otherwise.
 // seedCoveredFromJournal loads a previous attempt's banked nested
 // members so this run defers them. A missing journal is a fresh
-// run, not an error; keys are opaque and embed their source, so a
-// foreign journal's entries simply never match.
-func seedCoveredFromJournal(gate *pubGate, opts Options) {
+// run, not an error. Seeding is identity-gated: member keys embed
+// the source path but not its content, so a same-path byte swap
+// would otherwise defer members never read in the current bytes —
+// replaced content re-reads everything instead. Main enforces the
+// same rule when it resets batch entries; this covers direct
+// detector callers and range scans.
+func seedCoveredFromJournal(gate *pubGate, opts Options, seed scanTarget) {
 	if opts.CheckpointPath == "" {
 		return
 	}
@@ -956,9 +1005,23 @@ func seedCoveredFromJournal(gate *pubGate, opts Options) {
 	}
 	if cp.IsBatch() {
 		for _, t := range cp.Targets {
-			if t.State == BatchActive {
-				gate.seedCovered(t.Covered)
+			if t.State != BatchActive {
+				continue
 			}
+			size, mtime := BatchIdentity(t.Path)
+			if !BatchIdentityMatches(t, size, mtime) {
+				if len(t.Covered) > 0 {
+					opts.logf("[scan] WARNING: batch journal identity for %s changed; banked members re-scanned\n", t.Path)
+				}
+				continue
+			}
+			gate.seedCovered(t.Covered)
+		}
+		return
+	}
+	if !journalIdentityMatches(cp, seed.Describe()) {
+		if len(cp.Covered) > 0 {
+			opts.logf("[scan] WARNING: checkpoint identity for %s changed; banked members re-scanned\n", seed.Describe())
 		}
 		return
 	}
@@ -1145,7 +1208,7 @@ func runPipeline(seed scanTarget, opts Options, onDetection func(Detection), onP
 		}
 	}
 	gate := newPubGate(opts.logWriter())
-	seedCoveredFromJournal(gate, opts)
+	seedCoveredFromJournal(gate, opts, seed)
 	defer func() {
 		if n := gate.skippedCount(); n > 0 {
 			opts.logf("[scan] WARNING: skipped %d nested archives past the %d publication cap; coverage is incomplete\n", n, maxOutstandingPubs)
@@ -1279,10 +1342,10 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 			return
 		}
 		if !isRoot && outcome.opened {
-			// Banked only once fully read: Describe() is
+			// Banked only once fully read: coverKeyOf() is
 			// stable across resumes of the same input, so
 			// the key re-identifies this member next run.
-			gate.bankCovered(target.Describe())
+			gate.bankCovered(coverKeyOf(target))
 		}
 		if isRoot && opts.strictRoot {
 			// The root promised bytes but yielded none (vanished
@@ -1569,7 +1632,7 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 					return false
 				}
 				if nestedOutcome.opened {
-					gate.bankCovered(nested.Describe())
+					gate.bankCovered(coverKeyOf(nested))
 				}
 			default:
 				drained = true

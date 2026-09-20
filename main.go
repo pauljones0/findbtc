@@ -702,12 +702,15 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 			return 0, true
 		}
 		// A digest mismatch warned above; an identity mismatch
-		// warns here. Either way the old offset and digest are
-		// meaningless for the bytes now on disk.
+		// warns here. Either way the old offset, digest, and
+		// banked members are meaningless for the bytes now on
+		// disk: stale covered keys would defer members never
+		// read in the current content.
 		if !detector.BatchIdentityMatches(*entry, size, mtime) {
 			fmt.Fprintf(os.Stderr, "[main] WARNING: batch: %s changed since completion; rescanning from the start\n", tgt)
 		}
 		entry.Offset = 0
+		entry.Covered = nil
 	}
 	start := int64(0)
 	if resume && (entry.State == detector.BatchActive || entry.State == detector.BatchFailed) {
@@ -729,6 +732,14 @@ func batchEntryStart(m *detector.BatchManifest, i int, tgt string, resume bool, 
 				fmt.Fprintf(os.Stderr, "[main] batch: %s %s from the start\n", verb, tgt)
 			}
 			entry.Offset = 0
+			// Banked members survive only for the same bytes:
+			// a rewound (offset 0) journal keeps its covered
+			// set, while replaced bytes drop it — stale keys
+			// would defer members never read in the current
+			// content.
+			if !detector.BatchIdentityMatches(*entry, size, mtime) {
+				entry.Covered = nil
+			}
 		}
 	}
 	entry.State = detector.BatchActive
