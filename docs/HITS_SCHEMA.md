@@ -19,6 +19,8 @@ means "this variant does not produce it", never "unknown".
 | `carve_path`, `carve` | never | never | never | when carving succeeds |
 | `hashes` | never | never | never | when mkey/keystore records found |
 | `salvage` | never | never | never | when a `.salvage.db` is written |
+| `fingerprint` | on `-patch` scans (history key); `-walk` sweeps carry the walk key when fingerprintable | never | as per scan | as per scan |
+| `commit`, `path`, `line` | on `-patch` scans, when inside a commit/diff/added-or-context line | never | as per scan | as per scan |
 
 Privacy notes: `words` appears only under the owner `--reveal` opt-in;
 `hashes` carries cracker inputs, never wallet ciphertext.

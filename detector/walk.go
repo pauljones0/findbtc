@@ -90,6 +90,9 @@ func Walk(root string, wopts WalkOptions, onDetection func(Detection), onProgres
 	if wopts.Scan.CheckpointPath != "" {
 		return stats, fmt.Errorf("checkpointing is not supported for directory sweeps (a single offset cannot resume a file list)")
 	}
+	if wopts.Scan.Patch {
+		return stats, fmt.Errorf("patch attribution is not supported for directory sweeps (walked files are not patch streams)")
+	}
 	info, err := os.Lstat(root)
 	if err != nil {
 		return stats, fmt.Errorf("cannot sweep %s: %w", root, err)

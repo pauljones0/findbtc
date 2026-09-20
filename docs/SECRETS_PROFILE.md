@@ -82,6 +82,49 @@ files with the swept tree, not in a public place. There is no fuzzy
 matching and baselines never auto-update: re-review and re-record
 deliberately.
 
+## Scanning git history
+
+Working-tree sweeps miss committed-then-removed secrets — the
+actual leak shape. Pipe history through stdin scanning with
+`-patch` and each hit attributes to its commit + repo path (+
+new-file line for added/context lines):
+
+    git log -p --no-color --no-ext-diff --no-textconv | findbtc -profile=secrets -patch -json - > history.jsonl
+
+Always pass `--no-color --no-ext-diff --no-textconv`: color codes,
+external diff drivers, and textconv filters rewrite patch bytes,
+which moves offsets and changes fingerprint keys. Ranges are the
+shell's job (`git log -p main..HEAD | ...`); findbtc never
+interprets revisions.
+
+The two-command history gate records accepted history once, then
+fails CI only on new leaks:
+
+    git log -p --no-color --no-ext-diff --no-textconv | findbtc -profile=secrets -patch -json - > history.jsonl
+    # review history.jsonl, keep the accepted hits as known.jsonl, then gate:
+    git log -p --no-color --no-ext-diff --no-textconv main..HEAD | findbtc -profile=secrets -patch -fail-on-hit -baseline known.jsonl -
+
+History fingerprints (`v1/history/<commit>/<path>/<needle>/<hash>`)
+key on commit + path + the patch line holding the match — never
+patch offsets, which re-ranging moves — so the same commit keys
+identically across full and ranged logs. Re-committing an accepted
+secret reports again (the leak is live again); unattributed hits
+(bytes outside any commit) never suppress. The pre-commit hook and
+CI workflow samples in `samples/` cover the worktree; add the
+history pipe alongside them where leaked-then-removed secrets
+matter.
+
+Caveats: patch headers parse dependency-free from the byte stream,
+so only column-0 `commit`/`diff`/`@@` headers count (quoted diffs
+in indented commit messages cannot hijack attribution). Supported
+inputs are `git log -p` / `git show` streams and mbox `format-patch`
+series (`From`-led commits); merge combined diffs (`diff --cc`)
+attribute commit+path with best-effort line numbers. Forensic
+containers piped with `-patch` scan raw like any other stdin input.
+Wallet needles keep their once-per-4KB-block reporting under
+`-patch`; secrets-profile matchers report every occurrence, which
+is why the history gate pairs `-patch` with `-profile=secrets`.
+
 ## Responding to hits
 
 1. Treat any carve as a live secret: move it to encrypted storage,
@@ -137,3 +180,7 @@ means anyone checked the key against a live service.
 - Private-key derivation is never attempted.
 - Found secrets are never verified online (no AWS/GitHub API calls).
 - The secrets profile never changes default-profile detections.
+- Native `git rev-list` walking is not built: the `git log -p | findbtc
+  -patch -` pipe covers history scanning with no git dependency, so a
+  native walker waits on demonstrated demand (demand check, Goal 36:
+  none recorded — ask if the pipe cannot express your range).

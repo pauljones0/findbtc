@@ -137,6 +137,166 @@ func TestStdinRefusals(t *testing.T) {
 	}
 }
 
+// gitHistoryRepo builds a fixture repo with a committed-then-removed
+// fake AWS key (the actual leak shape) and returns the repo dir plus
+// the two commit shas. Hermetic: identity, branch, and HOME are all
+// pinned so user config cannot interfere.
+func gitHistoryRepo(t *testing.T) (dir, sha1, sha2 string) {
+	t.Helper()
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	dir = t.TempDir()
+	home := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", append([]string{"-C", dir,
+			"-c", "user.name=Gate", "-c", "user.email=gate@x",
+			"-c", "init.defaultBranch=main", "-c", "commit.gpgsign=false",
+		}, args...)...)
+		cmd.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_NOSYSTEM=1")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init")
+	writeGateFile(t, dir, "config.env", "user=ops\naws_access_key_id=AKIAIOSFODNN7EXAMPLE\n")
+	run("add", "config.env")
+	run("commit", "-m", "add deploy config")
+	sha1 = run("rev-parse", "HEAD")
+	writeGateFile(t, dir, "config.env", "user=ops\n")
+	run("commit", "-am", "remove leaked key")
+	sha2 = run("rev-parse", "HEAD")
+	return dir, sha1, sha2
+}
+
+func gitLogPatch(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	home := t.TempDir()
+	cmd := exec.Command("git", append([]string{"-C", dir, "log", "-p",
+		"--no-color", "--no-ext-diff", "--no-textconv",
+	}, args...)...)
+	cmd.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_NOSYSTEM=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git log -p: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+// The history-gate contract (Goal 36): `git log -p` piped through
+// -patch attributes the leaked-then-removed key to its commits +
+// path, a reviewed baseline suppresses exactly the known findings
+// while a newly committed key still reports, and -fail-on-hit
+// exits 3 on unbaselined history.
+func TestPatchHistoryGate(t *testing.T) {
+	dir, sha1, sha2 := gitHistoryRepo(t)
+	patch := gitLogPatch(t, dir)
+
+	stdout, stderr, exit := runTestBinaryStdin(t, patch, "-profile=secrets", "-patch", "-json", "-")
+	if exit != 0 {
+		t.Fatalf("history scan exit %d (stderr: %s)", exit, firstLine(stderr))
+	}
+	var added, removed bool
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		if !strings.Contains(line, `"needle":"aws-access-key"`) {
+			continue
+		}
+		switch {
+		case strings.Contains(line, `"commit":"`+sha1+`"`) &&
+			strings.Contains(line, `"path":"config.env"`) &&
+			strings.Contains(line, `"line":2`):
+			added = true
+		case strings.Contains(line, `"commit":"`+sha2+`"`) &&
+			strings.Contains(line, `"path":"config.env"`) &&
+			!strings.Contains(line, `"line":`):
+			removed = true
+		}
+	}
+	if !added || !removed {
+		t.Fatalf("want added-line hit (%s) and removed-line hit (%s), got:\n%s", sha1, sha2, stdout)
+	}
+
+	// A reviewed baseline silences exactly the known findings.
+	baseline := writeGateFile(t, dir, "known.jsonl", stdout)
+	gotOut, gotErr, gotExit := runTestBinaryStdin(t, patch, "-profile=secrets", "-patch", "-json", "-baseline", baseline, "-")
+	if gotExit != 0 {
+		t.Fatalf("baselined history exit %d (stderr: %s)", gotExit, firstLine(gotErr))
+	}
+	if strings.TrimSpace(gotOut) != "" {
+		t.Fatalf("baselined history must print no hits, got:\n%s", gotOut)
+	}
+	if !strings.Contains(gotErr, "suppressed by baseline") {
+		t.Errorf("baselined history must report suppression, stderr:\n%s", gotErr)
+	}
+
+	// Without the baseline the gate trips.
+	_, _, failExit := runTestBinaryStdin(t, patch, "-profile=secrets", "-patch", "-fail-on-hit", "-")
+	if failExit != 3 {
+		t.Errorf("ungated history with -fail-on-hit must exit 3, got %d", failExit)
+	}
+
+	// A newly committed key reports while the old findings stay silent.
+	writeGateFile(t, dir, "config.env", "user=ops\naws_access_key_id=AKIAZZZZZZZZZZZZZZZZ\n")
+	home := t.TempDir()
+	add := exec.Command("git", "-C", dir, "-c", "user.name=Gate", "-c", "user.email=gate@x",
+		"commit", "-am", "rotate key")
+	add.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_NOSYSTEM=1")
+	if out, err := add.CombinedOutput(); err != nil {
+		t.Fatalf("commit 3: %v\n%s", err, out)
+	}
+	rev := exec.Command("git", "-C", dir, "rev-parse", "HEAD")
+	rev.Env = append(os.Environ(), "HOME="+home, "GIT_CONFIG_NOSYSTEM=1")
+	sha3out, err := rev.CombinedOutput()
+	if err != nil {
+		t.Fatalf("rev-parse: %v", err)
+	}
+	sha3 := strings.TrimSpace(string(sha3out))
+	patch3 := gitLogPatch(t, dir)
+	newOut, _, newExit := runTestBinaryStdin(t, patch3, "-profile=secrets", "-patch", "-json", "-baseline", baseline, "-")
+	if newExit != 0 {
+		t.Fatalf("ranged re-gate exit %d", newExit)
+	}
+	if !strings.Contains(newOut, `"commit":"`+sha3+`"`) {
+		t.Fatalf("new commit %s must report, got:\n%s", sha3, newOut)
+	}
+	if strings.Contains(newOut, `"commit":"`+sha1+`"`) || strings.Contains(newOut, `"commit":"`+sha2+`"`) {
+		t.Fatalf("old commits must stay suppressed, got:\n%s", newOut)
+	}
+}
+
+// -patch attributes one patch stream: modes that slice, sweep, or
+// decode other shapes refuse it, and -baseline without -patch (or
+// -walk) still refuses.
+func TestPatchRefusals(t *testing.T) {
+	dir := t.TempDir()
+	target := writeGateFile(t, dir, "target.bin", strings.Repeat("x", 100))
+	ckpt := writeGateFile(t, dir, "known.jsonl", "{}\n")
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+		exit int
+	}{
+		{"fs", []string{"-patch", "-fs", target}, "no meaning for -fs", 1},
+		{"walk", []string{"-patch", "-walk", dir}, "not patches", 1},
+		{"unallocated", []string{"-patch", "-unallocated-only", target}, "would misattribute", 1},
+		{"checkpoint", []string{"-patch", "-checkpoint", ckpt, target}, "not supported with -patch", 1},
+		{"resume", []string{"-patch", "-checkpoint", ckpt, "-resume", target}, "not supported with -patch", 1},
+		{"fs-baseline", []string{"-fs", target, "-baseline", ckpt}, "no meaning for -fs", 2},
+		{"baseline", []string{"-baseline", ckpt, target}, "-walk and -patch findings only", 2},
+	} {
+		_, stderr, exit := runTestBinary(t, tc.args...)
+		if exit != tc.exit {
+			t.Errorf("%s: expected exit %d, got %d", tc.name, tc.exit, exit)
+		}
+		if !strings.Contains(stderr, tc.want) {
+			t.Errorf("%s: stderr must contain %q, got:\n%s", tc.name, tc.want, stderr)
+		}
+	}
+}
+
 func writeGateFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

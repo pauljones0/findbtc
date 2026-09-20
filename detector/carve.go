@@ -102,8 +102,14 @@ func carveDetection(source scanTarget, d *Detection, dir string, contextBytes in
 	if err != nil {
 		return err
 	}
-	sidecarPath := strings.TrimSuffix(binPath, ".bin") + ".json"
-	return os.WriteFile(sidecarPath, append(sidecar, '\n'), 0644)
+	return os.WriteFile(sidecarPathFor(binPath), append(sidecar, '\n'), 0644)
+}
+
+// sidecarPathFor names the JSON sidecar for a carve file. Patch
+// attribution reuses it to re-marshal sidecars with commit/path
+// after its post-pass.
+func sidecarPathFor(binPath string) string {
+	return strings.TrimSuffix(binPath, ".bin") + ".json"
 }
 
 // classifyCarve reads a bounded window around the hit from the carved file

@@ -110,6 +110,10 @@ func ScanStdinWithOptions(r io.Reader, startOffset int64, opts Options, onDetect
 	}
 	defer os.Remove(spillName)
 	opts.strictRoot = true
+	if opts.Patch {
+		// The spill outlives attribution: parsed before removal.
+		return scanPatch(&stdinScanTarget{spill: spillName, start: startOffset}, opts, onDetection, onProgress)
+	}
 	return runPipeline(&stdinScanTarget{spill: spillName, start: startOffset}, opts, onDetection, onProgress)
 }
 

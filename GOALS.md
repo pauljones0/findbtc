@@ -1133,12 +1133,45 @@ gitleaks-license friction opens a wedge for a free offline
 alternative. Depends on Goal 35; do not implement before it.
 
 **Completely solved when:**
-- [ ] `git log -p` piped through stdin scanning attributes
+- [x] `git log -p` piped through stdin scanning attributes
       findings to commit + path (patch headers parsed
       dependency-free); baselines match across it.
-- [ ] Docs show the two-command history gate; demand check
+- [x] Docs show the two-command history gate; demand check
       recorded for native `git rev-list` walking (separate
       future goal only if asked).
+
+Decision record (Goal 36): `-patch` parses the scanned bytes as
+a patch series (`git log -p` / `git show` / mbox `format-patch`)
+in one forward re-read and stamps root-target hits with commit
++ repo path + new-file line (added/context lines; 0 for
+removed/message bytes), plus `v1/history/<commit>/<path>/
+<needle>/<line-hash>` fingerprints keyed on commit + path + raw
+patch line — never patch offsets, so the same commit keys
+identically across full and ranged logs. Detections buffer and
+deliver after the scan (progress still streams); sidecars are
+re-marshaled with the attribution; nested hits stay bare
+(member-relative offsets). Loud boundaries: `-patch` refuses
+`-fs`/`-walk`/`-unallocated-only`/`-checkpoint`/`-resume` (the
+checkpoint refusal closes a crash+resume coverage hole: the
+journal would certify hits still buffered), `Walk` refuses
+`Patch` at library level, `-baseline` extends to patch scans
+(suppression + stderr count, mirroring walk) and now refuses
+`-fs` too, merge combined diffs get best-effort lines, zero-commit
+input warns that baselines are inert, and the re-read honors
+`opts.Context`. Fixed from review/supervisor probes: in-hunk
+`+++`/`---` content no longer hijacks the path (proven on the
+supervisor's actual-git fixture, independently re-verified),
+`--cc` path, CRLF paths, quoted paths, closing-`@@` required,
+`From` accepts sha256 length. Evidence: 21 library tests
+(attribution, range-stability, golden hash, deletion/rename,
+hunks, quoted-message/content/context, mbox, CRLF, truncation,
+non-patch, nested, sidecars, ranges/checkpoint/walk refusals,
+cancel, zero-commit warning) + fixture-repo gate (real git:
+leak-then-removed attributed, baseline suppresses exactly,
+new-commit reports, fail-on-hit exits 3) + refusal gates;
+adversarial review FAIL:8, all fixed with tests; full suite
+SUITE_EXIT=0. Demand check for native `git rev-list` walking:
+none recorded — documented non-goal, future goal only if asked.
 
 **Execute:**
 1. Parse patch headers (commit/path/hunk) from the piped

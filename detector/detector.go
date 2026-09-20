@@ -112,9 +112,19 @@ type Detection struct {
 	// when salvage wrote a .salvage.db file.
 	Salvage *SalvageInfo `json:"salvage,omitempty"`
 	// Fingerprint keys the finding for baseline suppression (Goal 29):
-	// "v1/<relpath>/<needle>/<line-hash>". Set only by -walk sweeps,
-	// which know the tree root; empty everywhere else.
+	// "v1/<relpath>/<needle>/<line-hash>" on -walk sweeps, which know
+	// the tree root, and "v1/history/<commit>/<path>/<needle>/<hash>"
+	// on patch (-patch) scans; empty everywhere else.
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// Commit is the enclosing commit sha for patch (-patch) scans;
+	// empty for other modes and for bytes outside any commit.
+	Commit string `json:"commit,omitempty"`
+	// Path is the enclosing repo-relative file for patch scans;
+	// empty for other modes and outside any diff.
+	Path string `json:"path,omitempty"`
+	// Line is the new-file line number holding the hit on patch
+	// scans, set only for added/context lines; 0 otherwise.
+	Line int `json:"line,omitempty"`
 	// Verified reports that a DER-family PEM body base64-decoded and
 	// parsed as a DER SEQUENCE (Goal 30). Structural offline check
 	// only — it says the block is well-formed, never that the key
@@ -247,6 +257,14 @@ type Options struct {
 	// for quiet embedding. Detection output never goes here — it
 	// flows through the onDetection callback.
 	Log io.Writer
+	// Patch treats the input as a patch series (git log -p) and
+	// attributes each root-target hit to commit + repo path (+
+	// new-file line for added/context lines), with a history
+	// fingerprint for baseline suppression. Detections buffer and
+	// deliver after the scan (progress still streams); carve
+	// sidecars are re-marshaled with the attribution. Nested
+	// archive hits stay unattributed (member-relative offsets).
+	Patch bool
 	// Context cancels the scan. Nil means context.Background (run to
 	// completion). On cancellation ScanWithOptions and friends return
 	// promptly with ctx.Err(): detections already delivered stay
@@ -337,6 +355,13 @@ func Scan(startOffset int64, path string, onDetection func(Detection), onProgres
 // inside it stay warn-and-continue.
 func ScanWithOptions(startOffset int64, path string, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
+	// Patch findings buffer for attribution and deliver after the
+	// checkpoint journals completion: a crash in between would
+	// resume past findings that never reported, so the combination
+	// refuses loudly instead of certifying lost coverage.
+	if opts.Patch && (opts.CheckpointPath != "" || opts.Resume) {
+		return fmt.Errorf("cannot scan patch: -checkpoint and -resume would resume past buffered findings; scan without them")
+	}
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("cannot scan %s: %w", path, err)
 	}
@@ -350,7 +375,51 @@ func ScanWithOptions(startOffset int64, path string, opts Options, onDetection f
 		return err
 	}
 	opts.strictRoot = true
+	if opts.Patch {
+		return scanPatch(target, opts, onDetection, onProgress)
+	}
 	return runPipeline(target, opts, onDetection, onProgress)
+}
+
+// scanPatch runs the pipeline buffering detections, then attributes
+// them to patch positions in one forward re-read of the target and
+// delivers in scan order. Attribution never fails the scan: a
+// re-read failure warns and the findings report with whatever was
+// stamped (possibly bare). Cancellation returns promptly with
+// ctx.Err() instead: no re-read, no further delivery.
+func scanPatch(target scanTarget, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
+	ctx := opts.scanContext()
+	var buffered []Detection
+	runErr := runPipeline(target, opts, func(d Detection) {
+		buffered = append(buffered, d)
+	}, onProgress)
+	if ctx.Err() != nil {
+		if runErr != nil {
+			return runErr
+		}
+		return ctx.Err()
+	}
+	if len(buffered) > 0 {
+		if f, err := target.Open(); err != nil {
+			opts.logf("[patch] warning: attribution skipped (cannot re-read %s: %s)\n", target.Describe(), err.Error())
+		} else {
+			aerr := attributePatch(ctx, f, target.Describe(), buffered, opts.logWriter())
+			f.Close()
+			if aerr != nil && ctx.Err() != nil {
+				if runErr != nil {
+					return runErr
+				}
+				return ctx.Err()
+			}
+			// Read errors warn inside attributePatch; delivery
+			// and sidecars carry whatever was stamped.
+			rewritePatchSidecars(buffered, opts.logWriter())
+		}
+		for _, d := range buffered {
+			onDetection(d)
+		}
+	}
+	return runErr
 }
 
 // rangeJournalCtx identifies one range within a journaled range scan.
@@ -371,6 +440,9 @@ type rangeJournalCtx struct {
 // Either callback may be nil.
 func ScanRangesWithOptions(path string, ranges []FSExtent, opts Options, onDetection func(Detection), onProgress func(ProgressInfo)) error {
 	onDetection, onProgress = withDefaultCallbacks(onDetection, onProgress)
+	if opts.Patch {
+		return fmt.Errorf("cannot scan patch: range scans slice the input, so patch positions would misattribute; scan the whole file instead")
+	}
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("cannot scan %s: %w", path, err)
 	}

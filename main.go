@@ -53,7 +53,8 @@ func main() {
 	dfxmlPath := flag.String("dfxml", "", "Convert a -json hits file (or - for stdin) to DFXML on stdout instead of scanning")
 	verifyLogPath := flag.String("verify-case-log", "", "Re-hash the sources behind each record in case-log FILE and report match/mismatch instead of scanning")
 	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)")
-	baselinePath := flag.String("baseline", "", "Suppress -walk findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)")
+	baselinePath := flag.String("baseline", "", "Suppress -walk/-patch findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)")
+	patchMode := flag.Bool("patch", false, "Parse input as a patch series (git log -p): attribute hits to commit+path with history fingerprints for -baseline")
 	hashesPath := flag.String("hashes", "", "Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning")
 	tokenlistPath := flag.String("tokenlist", "", "Build a BTCRecover tokenlist from the words in FILE, a carve, or hits.jsonl with carves (or - for stdin) instead of scanning")
 	tokenlistOut := flag.String("tokenlist-out", "", "Write the tokenlist to PATH instead of stdout (only with -tokenlist)")
@@ -179,12 +180,24 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -fs needs a seekable FILE with filesystem offsets; pipes cannot provide them")
 			os.Exit(1)
 		}
+		if *patchMode {
+			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -patch attributes raw patch bytes; it has no meaning for -fs entry scans")
+			os.Exit(1)
+		}
+		if *baselinePath != "" {
+			fmt.Fprintln(os.Stderr, "[fs] Exiting due to error: -baseline suppresses -walk and -patch findings only; it has no meaning for -fs")
+			os.Exit(2)
+		}
 		runFS(*fsPath, *fsOffset, !fsOffsetSet, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *checkpointPath, *resume, *profile, *failOnHit)
 		return
 	}
 	if *walkPath != "" {
 		if *walkPath == "-" {
 			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -walk needs a directory to sweep; pipes cannot provide one")
+			os.Exit(1)
+		}
+		if *patchMode {
+			fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -patch attributes one patch stream; -walk sweeps files that are not patches")
 			os.Exit(1)
 		}
 		if *resume || *checkpointPath != "" {
@@ -198,14 +211,14 @@ func main() {
 		runWalk(*walkPath, *walkFollow, *walkDepth, *jsonOut, *extractDir, *contextBytes, *reveal, *caseLog, *profile, *failOnHit, *baselinePath)
 		return
 	}
-	if *baselinePath != "" {
-		fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -baseline suppresses -walk findings only; it has no meaning for other modes")
+	if *baselinePath != "" && !*patchMode {
+		fmt.Fprintln(os.Stderr, "[walk] Exiting due to error: -baseline suppresses -walk and -patch findings only; it has no meaning for other modes")
 		os.Exit(2)
 	}
 	path := flag.Arg(0)
 
 	if path == "" {
-		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] DEVICE|-\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
+		fmt.Fprintf(os.Stderr, "Usage: %s [-s OFFSET] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]] [-unallocated-only [-fs-offset OFF]] [-case-log FILE] [-patch [-baseline FILE]] DEVICE|-\n   or: %s -report hits.jsonl [-json] [-fail-on-hit] [-complete --reveal [-complete-out PATH] [-complete-max N]]\n   or: %s -hashes FILE [-json]\n   or: %s -tokenlist FILE [-tokenlist-out PATH] [-tokenlist-max N]\n   or: %s -salvage FILE [-salvage-out PATH] [-json]\n   or: %s -watch FILE [-watch-out PATH] [-watch-format csv|json] [-watch-count N] [-balance-endpoint URL]\n   or: %s -fs FILE [-fs-offset OFF] [-json] [-profile NAME] [-fail-on-hit] [-extract-dir DIR [-context BYTES]] [-checkpoint FILE [-resume]]\n   or: %s -walk DIR [-walk-follow-symlinks] [-walk-maxdepth N] [-json] [-profile NAME] [-fail-on-hit] [-baseline FILE] [-extract-dir DIR [-context BYTES]]\n   or: %s -dfxml hits.jsonl\n   or: %s -verify-case-log case.jsonl\n   or: %s -advise TARGET\n\n", os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0])
 		flag.PrintDefaults()
 		os.Exit(2)
 	}
@@ -223,6 +236,15 @@ func main() {
 			fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume are not supported with stdin (pipes cannot resume)")
 			os.Exit(1)
 		}
+	}
+
+	if *patchMode && *unallocatedOnly {
+		fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -patch attributes whole patch streams; range scans would misattribute")
+		os.Exit(1)
+	}
+	if *patchMode && (*checkpointPath != "" || *resume) {
+		fmt.Fprintln(os.Stderr, "[main] Exiting due to error: -checkpoint and -resume are not supported with -patch (buffered findings would be lost on crash+resume)")
+		os.Exit(1)
 	}
 
 	start := *startOffset
@@ -261,9 +283,26 @@ func main() {
 		}
 	}
 
-	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume, Profile: *profile}
-	var hits int
+	opts := detector.Options{CarveDir: *extractDir, CarveContextBytes: *contextBytes, CheckpointPath: *checkpointPath, Reveal: *reveal, CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], Resume: *resume, Profile: *profile, Patch: *patchMode}
+	// History baselines suppress accepted history findings the way
+	// -walk baselines suppress accepted sweep findings; anything
+	// unfingerprinted always reports.
+	var baselineKeys map[string]bool
+	if *baselinePath != "" {
+		keys, err := detector.LoadBaselineFingerprints(*baselinePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		baselineKeys = keys
+		fmt.Fprintf(os.Stderr, "[main] baseline %s: %d known findings will stay silent\n", *baselinePath, len(keys))
+	}
+	var hits, suppressed int
 	printDetection := func(detection detector.Detection) {
+		if baselineKeys != nil && detection.Fingerprint != "" && baselineKeys[detection.Fingerprint] {
+			suppressed++
+			return
+		}
 		hits++
 		if *jsonOut {
 			line, err := json.Marshal(detection)
@@ -278,6 +317,16 @@ func main() {
 					"  %s\n", detection.Description)
 			if detection.FileName != "" {
 				fmt.Printf("  file: %s\n", detection.FileName)
+			}
+			if detection.Commit != "" {
+				loc := detection.Commit
+				if detection.Path != "" {
+					loc += " " + detection.Path
+					if detection.Line > 0 {
+						loc += fmt.Sprintf(":%d", detection.Line)
+					}
+				}
+				fmt.Printf("  commit: %s\n", loc)
 			}
 			if len(detection.Words) > 0 {
 				fmt.Printf("  words: %s\n", strings.Join(detection.Words, " "))
@@ -306,6 +355,9 @@ func main() {
 	}
 
 	fmt.Fprintln(os.Stderr, "[COMPLETE]")
+	if suppressed > 0 {
+		fmt.Fprintf(os.Stderr, "[main] %d suppressed by baseline\n", suppressed)
+	}
 	gateOnHits("main", hits, *failOnHit)
 }
 
