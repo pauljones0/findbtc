@@ -54,7 +54,7 @@ func main() {
 	completeMax := flag.Int("complete-max", detector.CompleteDefaultMax, "With -report -complete: candidates shown per hit, most-likely first (only with -complete)")
 	dfxmlPath := flag.String("dfxml", "", "Convert a -json hits file (or - for stdin) to DFXML on stdout instead of scanning")
 	verifyLogPath := flag.String("verify-case-log", "", "Re-hash the sources behind each record in case-log FILE and report match/mismatch instead of scanning")
-	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything)")
+	advisePath := flag.String("advise", "", "Inspect TARGET and print the recommended scan command with reasons (never scans, never runs anything; quoting targets POSIX sh on unix, PowerShell on Windows)")
 	baselinePath := flag.String("baseline", "", "Suppress -walk/-patch findings fingerprinted in baseline FILE (a reviewed hits.jsonl from an earlier sweep)")
 	patchMode := flag.Bool("patch", false, "Parse input as a patch series (git log -p): attribute hits to commit+path with history fingerprints for -baseline")
 	hashesPath := flag.String("hashes", "", "Extract crack-ready password hashes from FILE (or - for stdin) instead of scanning")
