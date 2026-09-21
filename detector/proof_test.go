@@ -71,17 +71,17 @@ func TestVerifySpan(t *testing.T) {
 func TestFilterCoveredBySpans(t *testing.T) {
 	spans := [][2]int64{{0, 4096}, {8192, 12288}}
 	filed := []string{
-		"member-a|rootext=0-4096",     // inside first span
-		"member-b|rootext=100-200",    // inside first span
-		"member-c|rootext=0-4097",     // straddles: out
-		"member-d|rootext=9000-9001",  // inside second span
-		"member-e|rootext=4096-8192",  // gap: out
-		"legacy-member",               // no provenance: out
-		"member-f|rootext=bad",        // malformed: out
-		"member-g|rootext=200-100",    // inverted: out
+		"member-a|rootext=0-4096",                     // inside first span
+		"member-b|rootext=100-200",                    // inside first span
+		"member-c|rootext=0-4097",                     // straddles: out
+		"member-d|rootext=9000-9001",                  // inside second span
+		"member-e|rootext=4096-8192",                  // gap: out
+		"legacy-member",                               // no provenance: out
+		"member-f|rootext=bad",                        // malformed: out
+		"member-g|rootext=200-100",                    // inverted: out
 		"member-h|zipsize=9|rootext=8-16|rootext=0-8", // last suffix wins: in
 	}
-	kept, dropped := filterCoveredBySpans(filed, spans)
+	kept, dropped, validated, conflicts := filterCoveredBySpans(filed, spans)
 	want := map[string]bool{"member-a": true, "member-b": true, "member-d": true, "member-h|zipsize=9|rootext=8-16": true}
 	if len(kept) != len(want) {
 		t.Fatalf("kept = %v, want %d members", kept, len(want))
@@ -93,6 +93,68 @@ func TestFilterCoveredBySpans(t *testing.T) {
 	}
 	if len(kept)+len(dropped) != len(filed) {
 		t.Fatalf("kept+dropped = %d, want %d", len(kept)+len(dropped), len(filed))
+	}
+	if len(conflicts) != 0 {
+		t.Fatalf("conflicts = %v, want none (distinct bases)", conflicts)
+	}
+	if len(validated) != len(want) {
+		t.Fatalf("validated covers %d bases, want %d", len(validated), len(want))
+	}
+}
+
+// Conflicting provenance for one identity drops every entry for
+// that base, whatever order they filed in (B1): a rejected span
+// must never overwrite a retained one, and two in-proof spans
+// have no unique span to retain. Exact duplicates keep; the
+// validated map carries exactly the kept pairs.
+func TestFilterCoveredConflictsDrop(t *testing.T) {
+	spans := [][2]int64{{0, 4096}}
+	for _, tc := range []struct {
+		name         string
+		filed        []string
+		wantKept     []string
+		wantDrop     int
+		wantConflict int
+	}{
+		{"valid plus out-of-proof", []string{"m|rootext=0-10", "m|rootext=5000-6000"}, nil, 2, 2},
+		{"reversed order", []string{"m|rootext=5000-6000", "m|rootext=0-10"}, nil, 2, 2},
+		{"two conflicting in-proof", []string{"m|rootext=0-10", "m|rootext=10-20"}, nil, 2, 2},
+		{"exact duplicates keep", []string{"m|rootext=0-10", "m|rootext=0-10"}, []string{"m", "m"}, 0, 0},
+		{"distinct bases keep", []string{"m|rootext=0-10", "n|rootext=0-10"}, []string{"m", "n"}, 0, 0},
+		{"conflict beside honest", []string{"m|rootext=0-10", "m|rootext=10-20", "n|rootext=0-10"}, []string{"n"}, 2, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kept, dropped, validated, conflicts := filterCoveredBySpans(tc.filed, spans)
+			if len(kept) != len(tc.wantKept) {
+				t.Fatalf("kept = %v, want %v", kept, tc.wantKept)
+			}
+			for i, k := range kept {
+				if k != tc.wantKept[i] {
+					t.Fatalf("kept = %v, want %v", kept, tc.wantKept)
+				}
+			}
+			if len(dropped) != tc.wantDrop {
+				t.Errorf("dropped = %v, want %d entries", dropped, tc.wantDrop)
+			}
+			if len(conflicts) != tc.wantConflict {
+				t.Errorf("conflicts = %v, want %d entries", conflicts, tc.wantConflict)
+			}
+			if len(kept)+len(dropped) != len(tc.filed) {
+				t.Errorf("kept+dropped = %d, want %d (conservation)", len(kept)+len(dropped), len(tc.filed))
+			}
+			for _, k := range kept {
+				if _, ok := validated[k]; !ok {
+					t.Errorf("kept base %q has no validated span", k)
+				}
+			}
+			for _, c := range conflicts {
+				if base, _, _, ok := coverProvenance(c); !ok {
+					t.Errorf("conflict entry %q unparseable", c)
+				} else if _, ok := validated[base]; ok {
+					t.Errorf("conflicted base %q retained a span", base)
+				}
+			}
+		})
 	}
 }
 
@@ -156,7 +218,7 @@ func TestSnapshotProvenance(t *testing.T) {
 	// Seeded-only members re-file their seed-time span (else
 	// every attempt would replay them and never converge).
 	g4 := newPubGate(io.Discard)
-	kept, _ := g4.seedCovered([]string{"seeded-m|rootext=0-100"}, [][2]int64{{0, 4096}})
+	kept, _, _ := g4.seedCovered([]string{"seeded-m|rootext=0-100"}, [][2]int64{{0, 4096}})
 	if len(kept) != 1 || !g4.isCovered("seeded-m") {
 		t.Fatalf("seeded member not deferred: kept=%v", kept)
 	}

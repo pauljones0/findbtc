@@ -110,9 +110,15 @@ rewrites with restored timestamps, coarse-clock filesystems,
 stale NFS attributes) all fail closed at the proof. Banked
 nested members additionally carry the archive span they derive
 from and are kept only inside verified bytes, so a prefix proof
-never blesses members outside it. Explicit `-s` starts are
-caller assertions, never proven bytes: their journals file span
-proofs a later `-resume` refuses, rescanning from zero.
+never blesses members outside it — with one qualification for
+gzip: a member's end is unknowable before it reads, so deferral
+checks the filed start alone and a hand-shrunk span end is
+trusted up to its verified bytes (same trust boundary as the
+journal itself: operator-local state, never accept a journal
+from an untrusted source). Zip and recovery extents check in
+full. Explicit `-s` starts are caller assertions, never proven
+bytes: their journals file span proofs a later `-resume`
+refuses, rescanning from zero.
 
 The honest price is re-reads: a resume sequentially re-hashes
 the bytes it skips (no detection work, usually page-cache hot),
@@ -121,10 +127,16 @@ resumes re-verify every completed range. Budget roughly one
 extra sequential pass over skipped bytes — measured on this
 machine: re-verifying a 256 MiB prefix takes ~2 s (page-cache
 hot) against a ~39 s full scan. Two contracts remain
-with the operator: quiesce writers during scans (a concurrent
-write is detected and warned — completed skips check stability
-before and after the re-hash — but exact concurrent guarantees
-need a snapshot or write exclusion the tool does not claim),
+with the operator: quiesce writers during scans. For plain
+files scanned with journaling on (`-checkpoint`), a concurrent
+write is detected and warned — the run baselines the source at
+open and re-checks at root end, and completed skips check
+stability before and after the re-hash — but uncheckpointed
+plain scans run no pre/post check, and decoded sources (EWF
+sets, split spans) carry none either: a mid-scan mutation there
+is silent this run, and the next resume's proofs fail closed
+and rescan. Exact concurrent guarantees need a snapshot or
+write exclusion the tool does not claim,
 and re-image evidence whose bytes may have changed on a medium
 that cannot be re-read identically (failing media: resume
 re-reads fault the same way the scan did, so finish bad-media

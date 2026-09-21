@@ -171,16 +171,54 @@ func spanCovers(spans [][2]int64, start, end int64) bool {
 
 // filterCoveredBySpans splits filed cover keys into reusable base
 // keys (provenance inside spans) and dropped keys (no parseable
-// provenance or provenance outside verified bytes). Dropped members
+// provenance, provenance outside verified bytes, or conflicting
+// provenance). A base key filed under two different spans — a
+// malformed or merged journal — drops EVERY entry for that base,
+// whatever order they filed in: a rejected entry must never
+// alter retained provenance, and conflicting acceptances have no
+// unique span to retain. (Different members legitimately share
+// spans through depth inheritance; only same-identity conflicts
+// drop. Exact-duplicate filed entries keep.) validated carries
+// the unique span per kept base, so seeding retains the accepted
+// pair as one object instead of rebuilding provenance from filed
+// input; conflicts lists the filed entries dropped for conflict
+// (a subset of dropped) for precise warnings. Dropped members
 // re-read; nothing is deferred over unverified bytes.
-func filterCoveredBySpans(filed []string, spans [][2]int64) (kept, dropped []string) {
+func filterCoveredBySpans(filed []string, spans [][2]int64) (kept, dropped []string, validated map[string][2]int64, conflicts []string) {
+	type entry struct {
+		filed  string
+		base   string
+		span   [2]int64
+		parsed bool
+		in     bool
+	}
+	entries := make([]entry, 0, len(filed))
+	seen := map[string]map[[2]int64]bool{}
 	for _, k := range filed {
 		base, s, e, ok := coverProvenance(k)
-		if !ok || base == "" || !spanCovers(spans, s, e) {
-			dropped = append(dropped, k)
+		en := entry{filed: k, base: base, span: [2]int64{s, e}, parsed: ok && base != ""}
+		if en.parsed {
+			en.in = spanCovers(spans, s, e)
+			m := seen[base]
+			if m == nil {
+				m = map[[2]int64]bool{}
+				seen[base] = m
+			}
+			m[en.span] = true
+		}
+		entries = append(entries, en)
+	}
+	validated = map[string][2]int64{}
+	for _, en := range entries {
+		if !en.parsed || !en.in || len(seen[en.base]) > 1 {
+			dropped = append(dropped, en.filed)
+			if en.parsed && len(seen[en.base]) > 1 {
+				conflicts = append(conflicts, en.filed)
+			}
 			continue
 		}
-		kept = append(kept, base)
+		kept = append(kept, en.base)
+		validated[en.base] = en.span
 	}
-	return kept, dropped
+	return kept, dropped, validated, conflicts
 }

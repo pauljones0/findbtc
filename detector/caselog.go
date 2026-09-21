@@ -121,7 +121,7 @@ func (r *caseRecorder) noteDetection() {
 }
 
 func caseKind(seed scanTarget) string {
-	switch seed.(type) {
+	switch unwrapRestart(seed).(type) {
 	case *ewfScanTarget:
 		return "ewf"
 	case *splitScanTarget:
@@ -173,7 +173,7 @@ func (r *caseRecorder) finish(status string, runErr error) CaseLog {
 	if runErr != nil {
 		log.Error = runErr.Error()
 	}
-	if et, ok := r.seed.(*ewfScanTarget); ok && et.layout.hasMD5 {
+	if et, ok := unwrapRestart(r.seed).(*ewfScanTarget); ok && et.layout.hasMD5 {
 		ce := &CaseEWF{StoredMD5: hex.EncodeToString(et.layout.md5[:])}
 		if r.seed.StartOffset() == 0 && len(r.skipped) == 0 && log.Hash.MD5 != "" {
 			match := log.Hash.MD5 == ce.StoredMD5

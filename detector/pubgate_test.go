@@ -204,6 +204,134 @@ func TestPubGateCoverKeyDiscriminatesViews(t *testing.T) {
 	}
 }
 
+// Seeded (journal) deferral cross-checks the filed provenance
+// span against the rediscovered candidate's own extent: a filed
+// span the candidate does not occupy admits the member loudly
+// instead of deferring it. Banked-this-run members (no seeded
+// span) still defer unconditionally — their bytes were read
+// this run. Gzip candidates check the start alone: the consumed
+// end is unknowable before the member reads.
+func TestPubGateSeededSpanCrossCheck(t *testing.T) {
+	src := &fileScanTarget{path: "span.bin"}
+	gz := func() *gzipScanTarget { return &gzipScanTarget{source: src, gzipOffset: 700} }
+	z := func() *zipScanTarget { return &zipScanTarget{source: src, zipOffset: 100, fileIndex: 0, zipSize: 500} }
+	seed := func(g *pubGate, key string) {
+		t.Helper()
+		kept, _, _ := g.seedCovered([]string{key}, [][2]int64{{0, 4096}})
+		if len(kept) != 1 {
+			t.Fatalf("seed kept %v, want the key", kept)
+		}
+	}
+	t.Run("honest spans defer", func(t *testing.T) {
+		var log bytes.Buffer
+		g := newPubGate(&log)
+		seed(g, coverKeyOf(gz())+"|rootext=700-760")
+		seed(g, coverKeyOf(z())+"|rootext=100-600")
+		ch := make(chan scanTarget, 4)
+		if gatePublish(g, ch, gz()) {
+			t.Error("honest seeded gzip span admitted (must defer)")
+		}
+		if gatePublish(g, ch, z()) {
+			t.Error("honest seeded zip span admitted (must defer)")
+		}
+		if log.Len() > 0 {
+			t.Errorf("honest spans must defer quietly, got:\n%s", log.String())
+		}
+	})
+	t.Run("forged spans admit loudly", func(t *testing.T) {
+		var log bytes.Buffer
+		g := newPubGate(&log)
+		seed(g, coverKeyOf(gz())+"|rootext=0-100")
+		seed(g, coverKeyOf(z())+"|rootext=0-100")
+		ch := make(chan scanTarget, 4)
+		admitted := 0
+		if !gatePublish(g, ch, gz()) {
+			t.Error("forged gzip span deferred (must admit + warn)")
+		} else {
+			admitted++
+		}
+		if !gatePublish(g, ch, z()) {
+			t.Error("forged zip span deferred (must admit + warn)")
+		} else {
+			admitted++
+		}
+		if n := strings.Count(log.String(), "provenance span"); n != 2 {
+			t.Errorf("want 2 span-mismatch warnings, got %d:\n%s", n, log.String())
+		}
+		// The lie is dropped, not re-filed: draining the
+		// admits leaves no covered keys behind.
+		for i := 0; i < admitted; i++ {
+			<-ch
+		}
+		if got := g.snapshotCovered(); len(got) != 0 {
+			t.Errorf("dropped seeds re-filed = %v, want empty", got)
+		}
+	})
+	t.Run("banked this run defers without a span", func(t *testing.T) {
+		g := newPubGate(io.Discard)
+		g.bankCovered(gz())
+		ch := make(chan scanTarget, 1)
+		if gatePublish(g, ch, gz()) {
+			t.Error("banked-this-run member admitted (must defer)")
+		}
+	})
+}
+
+// Conflicting provenance for one identity drops every entry for
+// that member, whatever order they filed in: a rejected span
+// must never overwrite a retained one (B1), and two acceptances
+// have no unique span to retain. The member re-reads; nothing
+// is retained for a conflicted base.
+func TestSeededConflictsDropEntireBase(t *testing.T) {
+	src := &fileScanTarget{path: "inert.bin"}
+	m := &zipScanTarget{source: src, zipOffset: 100, zipSize: 500}
+	key := coverKeyOf(m)
+	spans := [][2]int64{{0, 20}}
+	for _, tc := range []struct {
+		name  string
+		filed []string
+	}{
+		{"valid plus out-of-proof duplicate", []string{key + "|rootext=0-10", key + "|rootext=100-600"}},
+		{"reversed order", []string{key + "|rootext=100-600", key + "|rootext=0-10"}},
+		{"two conflicting in-proof spans", []string{key + "|rootext=0-10", key + "|rootext=10-20"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := newPubGate(io.Discard)
+			kept, dropped, _ := g.seedCovered(tc.filed, spans)
+			if len(kept) != 0 {
+				t.Errorf("kept = %v, want empty (conflict drops all)", kept)
+			}
+			if len(dropped) != 2 {
+				t.Errorf("dropped = %v, want both filed entries", dropped)
+			}
+			if g.deferCovered(m) {
+				t.Error("conflicted member deferred (must re-read)")
+			}
+			if _, ok := g.seedSpan[key]; ok {
+				t.Errorf("retained span for conflicted base %q", key)
+			}
+		})
+	}
+	t.Run("exact duplicates keep once", func(t *testing.T) {
+		g := newPubGate(io.Discard)
+		kept, dropped, _ := g.seedCovered([]string{key + "|rootext=0-10", key + "|rootext=0-10"}, spans)
+		if len(kept) == 0 || len(dropped) != 0 {
+			t.Errorf("kept = %v dropped = %v, want the identical span kept", kept, dropped)
+		}
+		if sp, ok := g.seedSpan[key]; !ok || sp != [2]int64{0, 10} {
+			t.Errorf("retained span = %v,%v, want [0 10]", sp, ok)
+		}
+	})
+	t.Run("different members may share spans", func(t *testing.T) {
+		other := &zipScanTarget{source: src, zipOffset: 100, fileIndex: 1, zipSize: 500}
+		g := newPubGate(io.Discard)
+		kept, _, _ := g.seedCovered([]string{key + "|rootext=0-10", coverKeyOf(other) + "|rootext=0-10"}, spans)
+		if len(kept) != 2 {
+			t.Errorf("kept = %v, want both members (shared spans are depth inheritance, not conflict)", kept)
+		}
+	})
+}
+
 func TestPubGateCapZeroAdmitsNothing(t *testing.T) {
 	old := maxOutstandingPubs
 	maxOutstandingPubs = 0

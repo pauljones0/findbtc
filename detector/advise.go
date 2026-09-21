@@ -1,6 +1,7 @@
 package detector
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"runtime"
@@ -10,14 +11,20 @@ import (
 
 // Guided mode (Goal 27): -advise inspects a target and recommends the
 // documented-best command with reasons. It never scans content and
-// never runs anything: inspection reads at most boot sectors and
-// partition tables (Stat, OpenFS probes, ScanPartitions).
+// never runs anything: inspection reads at most boot sectors,
+// partition tables (Stat, OpenFS probes, ScanPartitions), and the
+// first kilobyte for magic sniffing (Goal 43).
 //
 // Routing table (target shape → command):
 //
 //	directory            → -walk (sweep every file)
 //	volume at offset 0   → -fs (deleted entries with filenames)
 //	partitioned disk     → -fs (auto-seed, no -fs-offset needed)
+//	EWF v1 container     → raw scan (pass the image; decodes itself)
+//	EWF2 container       → no command (libewf conversion pointer)
+//	wallet copy (mkey, complete keystore)
+//	                     → -hashes (crack-ready export, no scan)
+//	key file (xpubs)     → -watch (local address derivation)
 //	anything else        → raw scan (every byte, no filenames)
 //	empty / unreadable   → no command, reasons say why
 //
@@ -36,8 +43,9 @@ type Advice struct {
 }
 
 // Advise inspects path and recommends the documented-best command.
-// It reads at most boot sectors and partition tables: content is
-// never scanned and nothing is run.
+// It reads at most boot sectors, partition tables, and the first
+// kilobyte for magic sniffing: content is never scanned and nothing
+// is run.
 func Advise(path string) (Advice, error) {
 	ad := Advice{Target: path}
 	fi, err := os.Stat(path)
@@ -52,6 +60,19 @@ func Advise(path string) (Advice, error) {
 		return ad, fmt.Errorf("cannot advise on %s: %w", path, err)
 	}
 	defer f.Close()
+	head := adviseHead(f)
+	// Container magic is decisive (8 exact bytes): no filesystem or
+	// partition table can start with it, so it routes before the
+	// shape probes. EWF2 has no findbtc path — the reasons carry
+	// the libewf conversion pointer with no command.
+	if len(head) >= len(ewf2Signature) && bytes.Equal(head[:len(ewf2Signature)], ewf2Signature) {
+		return adviseEWF2(path)
+	}
+	// EWF v1 scans as today (detectScanTarget decodes the set);
+	// only the reason changes, to name the sniffed magic.
+	if len(head) >= len(ewfSignature) && bytes.Equal(head[:len(ewfSignature)], ewfSignature) {
+		return adviseRaw(path, fi, "starts with EnCase EWF magic: pass the image file itself — chunks decode and verify automatically (multi-segment sets: pass .E01/.s01)")
+	}
 	if kind, _, err := OpenFS(f, 0); err == nil {
 		ad.Command = fmt.Sprintf("findbtc -fs %s", shellQuote(path))
 		ad.Reasons = []string{
@@ -90,7 +111,99 @@ func Advise(path string) (Advice, error) {
 		sort.Strings(descs)
 		return adviseRaw(path, fi, fmt.Sprintf("partition table holds %d entries (%s) but none opens as a supported filesystem", len(parts), strings.Join(descs, "; ")))
 	}
+	return adviseFollowupOrRaw(path, fi, head)
+}
+
+// adviseSniffBytes bounds follow-up magic sniffing to the first
+// kilobyte: enough for container magic, a wallet record, a keystore,
+// or a key line — never a scan, never a run.
+const adviseSniffBytes = 1024
+
+// adviseHead reads up to the first adviseSniffBytes of f at offset
+// 0. Short files yield a short head; read errors yield what was
+// read. Callers treat a head with no match as ambiguous, which
+// routes to the raw default.
+func adviseHead(f *os.File) []byte {
+	buf := make([]byte, adviseSniffBytes)
+	n, _ := f.ReadAt(buf, 0)
+	return buf[:n]
+}
+
+// adviseFollowupOrRaw routes shapeless targets: follow-up inputs
+// with decisive first-kilobyte evidence go to their mode (-hashes,
+// -watch); everything ambiguous keeps the raw default, since a
+// false route strands a scan-worthy target worse than raw does.
+// Volumes and partitioned disks never reach here, so the shape
+// table is unchanged.
+func adviseFollowupOrRaw(path string, fi os.FileInfo, head []byte) (Advice, error) {
+	if len(head) > 0 {
+		if mkeys := FindMasterKeys(head, 0); len(mkeys) > 0 {
+			return adviseHashes(path, fmt.Sprintf("%s: first %d bytes hold a Bitcoin Core mkey record at offset %d (%d iterations, method 0)", path, len(head), mkeys[0].Offset(), mkeys[0].Iterations()))
+		}
+		if stores := findKeystores(head, 0); len(stores) > 0 {
+			return adviseHashes(path, fmt.Sprintf("%s: first %d bytes hold a complete Ethereum keystore object at offset %d (address + crypto envelope)", path, len(head), stores[0].startAbs))
+		}
+		// Private-only input stays raw: -watch would refuse it,
+		// so routing there strands the target.
+		if pubs, _ := ExtractXpubs(head); len(pubs) > 0 {
+			return adviseWatch(path, len(head), pubs)
+		}
+	}
 	return adviseRaw(path, fi, "no partition table or filesystem found")
+}
+
+// adviseHashes routes an encrypted-wallet copy to -hashes.
+func adviseHashes(path, evidence string) (Advice, error) {
+	return Advice{
+		Target:  path,
+		Command: fmt.Sprintf("findbtc -hashes %s", shellQuote(path)),
+		Reasons: []string{
+			evidence,
+			"-hashes exports the crack-ready hash without scanning (runbook docs/PASSWORD_RECOVERY.md)",
+		},
+	}, nil
+}
+
+// adviseWatch routes a key file to -watch. Labels name the sniffed
+// key versions; the keys themselves stay out of the reasons.
+func adviseWatch(path string, headLen int, pubs []string) (Advice, error) {
+	var labels []string
+	seen := map[string]bool{}
+	for _, s := range pubs {
+		if x, err := ParseXPub(s); err == nil && !seen[x.Label] {
+			seen[x.Label] = true
+			labels = append(labels, x.Label)
+		}
+	}
+	keysWord := "extended public keys"
+	if len(pubs) == 1 {
+		keysWord = "extended public key"
+	}
+	evidence := fmt.Sprintf("%s: first %d bytes hold %d checksum-valid %s", path, headLen, len(pubs), keysWord)
+	if len(labels) > 0 {
+		evidence += fmt.Sprintf(" (%s)", strings.Join(labels, "+"))
+	}
+	return Advice{
+		Target:  path,
+		Command: fmt.Sprintf("findbtc -watch %s", shellQuote(path)),
+		Reasons: []string{
+			evidence,
+			"-watch derives watch-only addresses locally with no network calls",
+		},
+	}, nil
+}
+
+// adviseEWF2 answers an EWF2 container with the documented
+// conversion pointer and no command: there is no findbtc path for
+// Ex01/Lx01, so a "Recommended" line would be a lie.
+func adviseEWF2(path string) (Advice, error) {
+	return Advice{
+		Target: path,
+		Reasons: []string{
+			fmt.Sprintf("%s starts with EWF2 (Ex01/Lx01) magic: only EWF v1 (E01) and SMART (S01) scan directly", path),
+			fmt.Sprintf("convert first with libewf (ewfexport -u -t out -f raw %s) and scan the raw output", shellQuote(path)),
+		},
+	}, nil
 }
 
 // adviseDir routes directories to -walk.

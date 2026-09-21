@@ -36,6 +36,82 @@ func TestVerifyCaseLogMatch(t *testing.T) {
 	}
 }
 
+// A refused resume restarts at zero, and the case log must say
+// so: recording the caller's rewound start while hashing from
+// zero fails verification ("re-read N bytes, log says M"). The
+// post-refusal record carries start_offset 0 and verifies.
+func TestVerifyCaseLogRefusedResume(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "refuse.bin")
+	raw := bytes.Repeat([]byte{'x'}, 32<<10)
+	copy(raw[100:], "bestblock")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	ckpt := filepath.Join(dir, "refuse.cp")
+	logPath := filepath.Join(dir, "case.jsonl")
+	const point = 18 << 10
+	// Legacy journal (no proof): the claim refuses and the run
+	// restarts at zero with a warning.
+	writeCheckpoint(nil, ckpt, path, point, nil, testIdent(path), nil)
+	var log bytes.Buffer
+	if err := ScanWithOptions(point, path,
+		Options{CheckpointPath: ckpt, CaseLogPath: logPath, ToolVersion: "test", Resume: true, Log: &log},
+		func(Detection) {}, nil); err != nil {
+		t.Fatalf("post-refusal scan: %v\n%s", err, log.String())
+	}
+	if !strings.Contains(log.String(), "rescanning from the start") {
+		t.Fatalf("refusal must warn rescan, got:\n%s", log.String())
+	}
+	recs := readCaseLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("case log holds %d records, want 1", len(recs))
+	}
+	if recs[0].Source.StartOffset != 0 {
+		t.Fatalf("post-refusal start_offset = %d, want 0 (the run restarted)", recs[0].Source.StartOffset)
+	}
+	var out bytes.Buffer
+	if err := VerifyCaseLog(logPath, &out); err != nil {
+		t.Fatalf("post-refusal log must verify: %v\n%s", err, out.String())
+	}
+}
+
+// An EWF refused-resume keeps its decoded identity through the
+// restart: the record still says kind "ewf" with the stored-MD5
+// cross-check (a full restart hashes the whole media, so the
+// match computes), and it verifies.
+func TestVerifyCaseLogRefusedEWFResume(t *testing.T) {
+	dir := t.TempDir()
+	e01 := buildEWF(t, dir, "r", bytes.Repeat([]byte{0x5A}, 64*1024), ewfBuildOpt{sectorsPerChunk: 8})
+	ckpt := filepath.Join(dir, "refuse.cp")
+	logPath := filepath.Join(dir, "case.jsonl")
+	const point = 18 << 10
+	writeCheckpoint(nil, ckpt, e01, point, nil, testIdent(e01), nil)
+	var log bytes.Buffer
+	if err := ScanWithOptions(point, e01,
+		Options{CheckpointPath: ckpt, CaseLogPath: logPath, ToolVersion: "test", Resume: true, Log: &log},
+		func(Detection) {}, nil); err != nil {
+		t.Fatalf("post-refusal EWF scan: %v\n%s", err, log.String())
+	}
+	if !strings.Contains(log.String(), "rescanning from the start") {
+		t.Fatalf("refusal must warn rescan, got:\n%s", log.String())
+	}
+	recs := readCaseLog(t, logPath)
+	if len(recs) != 1 {
+		t.Fatalf("case log holds %d records, want 1", len(recs))
+	}
+	if recs[0].Source.Kind != "ewf" {
+		t.Fatalf("post-refusal kind = %q, want ewf", recs[0].Source.Kind)
+	}
+	if recs[0].EWF == nil || recs[0].EWF.MD5Match == nil || !*recs[0].EWF.MD5Match {
+		t.Fatalf("post-refusal EWF record must carry a true MD5 match, got %+v", recs[0].EWF)
+	}
+	var out bytes.Buffer
+	if err := VerifyCaseLog(logPath, &out); err != nil {
+		t.Fatalf("post-refusal EWF log must verify: %v\n%s", err, out.String())
+	}
+}
+
 // Flipping one source byte after the scan must fail verification.
 func TestVerifyCaseLogTamper(t *testing.T) {
 	dir := t.TempDir()

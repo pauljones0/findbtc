@@ -7,6 +7,8 @@ package detector
 
 import (
 	"bytes"
+	"encoding/binary"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -146,6 +148,218 @@ func TestAdviseEmptyAndMissing(t *testing.T) {
 	}
 	if _, err := Advise(filepath.Join(t.TempDir(), "nope.bin")); err == nil {
 		t.Error("missing path must error")
+	}
+}
+
+// Follow-up routing (Goal 43): bounded first-kilobyte magic sends
+// containers, wallet copies, and key files to their documented
+// mode; everything ambiguous keeps the raw default.
+
+// EWF v1 images scan as today — only the reason changes, to name
+// the sniffed magic.
+func TestAdviseEWFImageScansAsToday(t *testing.T) {
+	synth := append(bytes.Clone(ewfSignature), make([]byte, 2040)...)
+	synthPath := filepath.Join(t.TempDir(), "synth.E01")
+	if err := os.WriteFile(synthPath, synth, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"synthetic": synthPath,
+		"real E01":  "testdata/ewf-real.E01",
+		"real S01":  "testdata/ewf-real.S01",
+	} {
+		ad, err := Advise(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ad.Command != "findbtc "+path {
+			t.Errorf("%s: command %q, want a scan of the image itself", name, ad.Command)
+		}
+		if joined := strings.Join(ad.Reasons, "; "); !strings.Contains(joined, "EnCase EWF magic") {
+			t.Errorf("%s: reasons %q must name the sniffed magic", name, joined)
+		}
+	}
+}
+
+// EWF2 has no findbtc path: advice carries the libewf conversion
+// pointer with no command, never a scan that would refuse.
+func TestAdviseEWF2PointsAtLibewf(t *testing.T) {
+	synth := append(bytes.Clone(ewf2Signature), make([]byte, 2040)...)
+	synthPath := filepath.Join(t.TempDir(), "synth.Ex01")
+	if err := os.WriteFile(synthPath, synth, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{
+		"synthetic": synthPath,
+		"real Ex01": "testdata/ewf-real.Ex01",
+	} {
+		ad, err := Advise(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ad.Command != "" {
+			t.Errorf("%s: command %q, want none (nothing runs EWF2)", name, ad.Command)
+		}
+		joined := strings.Join(ad.Reasons, "; ")
+		for _, want := range []string{"EWF2", "libewf", "ewfexport"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("%s: reasons %q must name %s", name, joined, want)
+			}
+		}
+	}
+}
+
+// synthMKeyValue builds a structural CMasterKey value (fixed
+// synthetic bytes — FindMasterKeys checks layout, not crypto).
+func synthMKeyValue() []byte {
+	v := []byte{mkeyCryptedLen}
+	ct := make([]byte, mkeyCryptedLen)
+	for i := range ct {
+		ct[i] = byte(i*3 + 1)
+	}
+	v = append(v, ct...)
+	v = append(v, mkeySaltLen, 1, 2, 3, 4, 5, 6, 7, 8)
+	var tmp [8]byte
+	binary.LittleEndian.PutUint32(tmp[0:4], 0)
+	binary.LittleEndian.PutUint32(tmp[4:8], 50000)
+	return append(v, tmp[:]...)
+}
+
+func TestAdviseWalletCopyRoutesToHashes(t *testing.T) {
+	dir := t.TempDir()
+	mkeyPath := filepath.Join(dir, "wallet-copy.bin")
+	pad := bytes.Repeat([]byte("frag-"), 40)
+	blob := append(append(bytes.Clone(pad), synthMKeyValue()...), pad...)
+	if err := os.WriteFile(mkeyPath, blob, 0644); err != nil {
+		t.Fatal(err)
+	}
+	keystorePath := filepath.Join(dir, "wallet.json")
+	if err := os.WriteFile(keystorePath, []byte(keystoreScryptJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	capitalPath := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(capitalPath, []byte(keystorePBKDF2JSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		path string
+		want string
+	}{
+		"mkey record":        {mkeyPath, "mkey record at offset 200"},
+		"keystore":           {keystorePath, "complete Ethereum keystore object at offset 0"},
+		"capitalized Crypto": {capitalPath, "complete Ethereum keystore object at offset 0"},
+	}
+	for name, tc := range cases {
+		ad, err := Advise(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ad.Command != "findbtc -hashes "+tc.path {
+			t.Errorf("%s: command %q, want findbtc -hashes", name, ad.Command)
+		}
+		if joined := strings.Join(ad.Reasons, "; "); !strings.Contains(joined, tc.want) {
+			t.Errorf("%s: reasons %q must name %s", name, joined, tc.want)
+		}
+	}
+}
+
+func TestAdviseKeysFileRoutesToWatch(t *testing.T) {
+	handoff := "# findbtc -complete handoff: watch-only account keys.\n" +
+		"# phrases never land in this file.\n" +
+		bip44MainXPub + "\n" + bip84MainZPub + "\n"
+	path := filepath.Join(t.TempDir(), "keys.txt")
+	if err := os.WriteFile(path, []byte(handoff), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ad, err := Advise(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ad.Command != "findbtc -watch "+path {
+		t.Errorf("command %q, want findbtc -watch", ad.Command)
+	}
+	joined := strings.Join(ad.Reasons, "; ")
+	if !strings.Contains(joined, "2 checksum-valid extended public keys (xpub+zpub)") {
+		t.Errorf("reasons %q must name the count and key versions", joined)
+	}
+	text := ad.Command + "\n" + joined
+	if strings.Contains(text, bip44MainXPub) || strings.Contains(text, bip84MainZPub) {
+		t.Errorf("advice must not echo the keys:\n%s", text)
+	}
+}
+
+// The sniff reads the first kilobyte only: decisive evidence past
+// the bound still routes raw.
+func TestAdviseFirstKilobyteBound(t *testing.T) {
+	dir := t.TempDir()
+	pad := make([]byte, 2000)
+	cases := map[string][]byte{
+		"mkey past 1KB":     append(bytes.Clone(pad), synthMKeyValue()...),
+		"keystore past 1KB": append(bytes.Clone(pad), keystoreScryptJSON...),
+		"xpub past 1KB":     append(bytes.Clone(pad), bip44MainXPub...),
+	}
+	for name, blob := range cases {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".bin")
+		if err := os.WriteFile(path, blob, 0644); err != nil {
+			t.Fatal(err)
+		}
+		ad, err := Advise(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ad.Command != "findbtc "+path {
+			t.Errorf("%s: command %q, want the raw default", name, ad.Command)
+		}
+	}
+}
+
+// Ambiguous input keeps the raw default: false routing strands a
+// scan-worthy target worse than raw does.
+func TestAdviseAmbiguousStaysRaw(t *testing.T) {
+	dir := t.TempDir()
+	rng := rand.New(rand.NewSource(7))
+	noise := make([]byte, 4096)
+	if _, err := rng.Read(noise); err != nil {
+		t.Fatal(err)
+	}
+	prose := []byte("Field notes, Tuesday: the drive spins up but the " +
+		"partition table looks wrong. Owner says the backup lived on a USB stick, " +
+		"maybe FAT, maybe exFAT — will image before anything else.\n")
+	truncated := []byte(`{"address":"de0b295669a9fd93d5f28d9ec85e40f4cb697bae",` +
+		`"crypto":{"cipher":"aes-128-ctr","ciphertext":"ab`)
+	badAddr := []byte(`{"address":"not-an-address",` +
+		`"crypto":{"cipher":"aes-128-ctr","ciphertext":"abcd","kdf":"scrypt"}}`)
+	// Published BIP32 test-vector master private key, not wallet
+	// material: -watch would refuse it, so advise must not route it.
+	privOnly := []byte("xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi\n")
+	looseEVF2 := []byte("EVF2dummyheader-not-the-real-8-byte-magic")
+	cases := map[string][]byte{
+		"random":             noise,
+		"prose":              prose,
+		"truncated keystore": truncated,
+		"bad-address JSON":   badAddr,
+		"private-only keys":  privOnly,
+		"loose EVF2 prefix":  looseEVF2,
+	}
+	for name, blob := range cases {
+		path := filepath.Join(dir, strings.ReplaceAll(name, " ", "_")+".bin")
+		if err := os.WriteFile(path, blob, 0644); err != nil {
+			t.Fatal(err)
+		}
+		ad, err := Advise(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ad.Command != "findbtc "+path {
+			t.Errorf("%s: command %q, want the raw default", name, ad.Command)
+		}
+		joined := strings.Join(ad.Reasons, "; ")
+		if !strings.Contains(joined, "no partition table or filesystem") {
+			t.Errorf("%s: reasons %q must explain the fallback", name, joined)
+		}
+		if strings.Contains(joined, "-hashes") || strings.Contains(joined, "-watch") || strings.Contains(joined, "EWF") {
+			t.Errorf("%s: reasons %q must not name a follow-up", name, joined)
+		}
 	}
 }
 

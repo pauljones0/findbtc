@@ -38,7 +38,15 @@
 // needle labels, new ProgressInfo/WalkStats counters, and new
 // filesystem and partition APIs. Options.Resume and the checkpoint
 // journal format are single-version crash recovery, not a
-// cross-version or cross-machine protocol.
+// cross-version or cross-machine protocol. Treat the journal as
+// operator-local state: resume verifies content proofs and
+// cross-checks filed member spans against the rediscovered
+// members' own extents (zip full extent, recovery
+// header-through-data, gzip start), and any mismatch re-reads
+// loudly — but a gzip member's end is unknowable before it
+// reads, so a hand-shrunk gzip span end is trusted up to its
+// verified bytes. Never accept a journal from an untrusted
+// source; when in doubt, delete it and rescan.
 //
 // Tier 3 — Internal. Exported only for the CLI, tests, and
 // benchmarks: pipeline primitives (Block, TargetReader), exposed magic

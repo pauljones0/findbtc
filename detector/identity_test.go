@@ -230,12 +230,12 @@ type fakeFileInfo struct {
 	size int64
 }
 
-func (f fakeFileInfo) Name() string       { return "fake" }
-func (f fakeFileInfo) Size() int64        { return f.size }
-func (f fakeFileInfo) Mode() os.FileMode  { return f.mode }
-func (fakeFileInfo) ModTime() time.Time   { return time.Time{} }
-func (fakeFileInfo) IsDir() bool          { return false }
-func (fakeFileInfo) Sys() any             { return nil }
+func (f fakeFileInfo) Name() string      { return "fake" }
+func (f fakeFileInfo) Size() int64       { return f.size }
+func (f fakeFileInfo) Mode() os.FileMode { return f.mode }
+func (fakeFileInfo) ModTime() time.Time  { return time.Time{} }
+func (fakeFileInfo) IsDir() bool         { return false }
+func (fakeFileInfo) Sys() any            { return nil }
 
 // TestCheapTierPassAuthorizesNothing is the isolated
 // platform-contract test: a metadata match — including a

@@ -122,6 +122,484 @@ func TestRangeProofTamperRescans(t *testing.T) {
 	})
 }
 
+// Resume=true without a readable journal restarts at zero with a
+// warning (B3) — missing, malformed, and inaccessible journals
+// must never silently authorize a caller skip. Without Resume,
+// the same unreadable journal beside an explicit start stays an
+// explicit caller assertion (fresh journaled runs stay quiet).
+func TestResumeUnreadableJournalRestarts(t *testing.T) {
+	mkSource := func(t *testing.T) (string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		path := filepath.Join(dir, "source.bin")
+		raw := bytes.Repeat([]byte{'x'}, 32<<10)
+		copy(raw[100:], "bestblock")
+		copy(raw[24000:], "defaultkey")
+		if err := os.WriteFile(path, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return path, filepath.Join(dir, "source.cp")
+	}
+	scan := func(t *testing.T, start int64, path, ckpt string, resume bool) (bool, string) {
+		t.Helper()
+		var log bytes.Buffer
+		head := false
+		err := ScanWithOptions(start, path, Options{CheckpointPath: ckpt, Resume: resume, Log: &log},
+			func(d Detection) {
+				if d.Offset == 100 {
+					head = true
+				}
+			}, nil)
+		if err != nil {
+			t.Fatalf("scan: %v\n%s", err, log.String())
+		}
+		return head, log.String()
+	}
+	const start = 16 << 10
+	t.Run("missing journal restarts loudly", func(t *testing.T) {
+		path, ckpt := mkSource(t)
+		head, log := scan(t, start, path, ckpt, true)
+		if !head {
+			t.Fatal("Resume with a missing journal skipped the head: silent suffix-only success")
+		}
+		if !strings.Contains(log, "cannot read checkpoint") || !strings.Contains(log, "starting from the beginning") {
+			t.Fatalf("must warn unreadable journal + restart, got:\n%s", log)
+		}
+	})
+	t.Run("malformed journal restarts loudly", func(t *testing.T) {
+		path, ckpt := mkSource(t)
+		if err := os.WriteFile(ckpt, []byte("{invalid"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		head, log := scan(t, start, path, ckpt, true)
+		if !head {
+			t.Fatal("Resume with a malformed journal skipped the head: silent suffix-only success")
+		}
+		if !strings.Contains(log, "cannot read checkpoint") {
+			t.Fatalf("must warn unreadable journal, got:\n%s", log)
+		}
+	})
+	t.Run("inaccessible journal restarts loudly", func(t *testing.T) {
+		path, ckpt := mkSource(t)
+		if err := os.WriteFile(ckpt, []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(ckpt, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(ckpt, 0644) })
+		if f, err := os.Open(ckpt); err == nil {
+			f.Close()
+			t.Skip("platform reads chmod-000 files (Windows/root)")
+		}
+		head, log := scan(t, start, path, ckpt, true)
+		if !head {
+			t.Fatal("Resume with an inaccessible journal skipped the head: silent suffix-only success")
+		}
+		if !strings.Contains(log, "cannot read checkpoint") {
+			t.Fatalf("must warn unreadable journal, got:\n%s", log)
+		}
+	})
+	t.Run("resume without a journal path restarts loudly", func(t *testing.T) {
+		path, _ := mkSource(t)
+		head, log := scan(t, start, path, "", true)
+		if !head {
+			t.Fatal("Resume without a checkpoint path skipped the head: silent suffix-only success")
+		}
+		if !strings.Contains(log, "without a checkpoint path") {
+			t.Fatalf("must warn missing journal path, got:\n%s", log)
+		}
+	})
+	t.Run("explicit start without resume stays quiet", func(t *testing.T) {
+		path, ckpt := mkSource(t)
+		head, log := scan(t, start, path, ckpt, false)
+		if head {
+			t.Fatal("explicit caller start must be honored, not restarted")
+		}
+		if strings.Contains(log, "cannot read checkpoint") || strings.Contains(log, "WARNING") {
+			t.Fatalf("fresh journaled run must stay quiet, got:\n%s", log)
+		}
+	})
+}
+
+// A zero-point journal authorizes nothing (F1): under Resume a
+// nonzero start continues no journal point and restarts loudly —
+// whether the point carries the tool-filed empty-span proof or a
+// legacy nil proof. At start zero the empty-span point adopts
+// its nothing quietly; the nil-proof point warns its legacy
+// shape and proceeds.
+func TestResumeZeroPointJournalRestarts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "zero.bin")
+	raw := bytes.Repeat([]byte{'x'}, 32<<10)
+	copy(raw[100:], "bestblock")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	emptySHA := "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	scan := func(t *testing.T, start int64, proof *PrefixProof) (bool, string) {
+		t.Helper()
+		ckpt := filepath.Join(dir, "zero.cp")
+		writeCheckpoint(nil, ckpt, path, 0, nil, testIdent(path), proof)
+		var log bytes.Buffer
+		head := false
+		if err := ScanWithOptions(start, path, Options{CheckpointPath: ckpt, Resume: true, Log: &log},
+			func(d Detection) {
+				if d.Offset == 100 {
+					head = true
+				}
+			}, nil); err != nil {
+			t.Fatalf("scan from %d: %v\n%s", start, err, log.String())
+		}
+		return head, log.String()
+	}
+	for _, arm := range []struct {
+		name  string
+		proof *PrefixProof
+	}{
+		{"tool-filed empty-span proof", &PrefixProof{Version: ProofVersion, Start: 0, Len: 0, SHA256: emptySHA}},
+		{"legacy nil proof", nil},
+	} {
+		t.Run(arm.name+" restarts a nonzero start loudly", func(t *testing.T) {
+			head, log := scan(t, 16<<10, arm.proof)
+			if !head {
+				t.Fatal("Resume with a zero-point journal skipped the head: silent suffix-only success")
+			}
+			if !strings.Contains(log, "starting from the beginning") && !strings.Contains(log, "rescanning from the start") {
+				t.Fatalf("must warn restart, got:\n%s", log)
+			}
+		})
+	}
+	t.Run("empty-span point adopts nothing quietly at zero", func(t *testing.T) {
+		head, log := scan(t, 0, &PrefixProof{Version: ProofVersion, Start: 0, Len: 0, SHA256: emptySHA})
+		if !head {
+			t.Fatal("start zero must scan the head")
+		}
+		if strings.Contains(log, "WARNING") {
+			t.Fatalf("nothing skipped, nothing owed: must stay quiet, got:\n%s", log)
+		}
+	})
+	t.Run("nil-proof point warns its shape at zero", func(t *testing.T) {
+		head, log := scan(t, 0, nil)
+		if !head {
+			t.Fatal("start zero must scan the head")
+		}
+		if !strings.Contains(log, "predates content proofs") {
+			t.Fatalf("legacy zero point must warn its shape, got:\n%s", log)
+		}
+	})
+}
+
+// A batch journal with no active entry authorizes no skip for a
+// whole-file run (F2): under Resume a nonzero start continues no
+// journal point and restarts loudly. Without Resume the explicit
+// start stands quietly.
+func TestResumeBatchNoActiveEntryRestarts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "alldone.bin")
+	raw := bytes.Repeat([]byte{'x'}, 32<<10)
+	copy(raw[100:], "bestblock")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	ckpt := filepath.Join(dir, "alldone.cp")
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileAllComplete := func(t *testing.T) {
+		t.Helper()
+		WriteBatchJournal(nil, ckpt, Checkpoint{
+			Path: path,
+			Run:  &BatchRun{},
+			Targets: []BatchTarget{{
+				Path:   path,
+				Size:   fi.Size(),
+				Mtime:  fi.ModTime().Unix(),
+				State:  BatchComplete,
+				Offset: int64(len(raw)),
+				Ident:  testIdent(path),
+				Proof:  mustProof(t, path, 0, int64(len(raw))),
+			}},
+		})
+	}
+	scan := func(t *testing.T, resume bool) (bool, string) {
+		t.Helper()
+		// Each scan files fresh: a completed run overwrites
+		// the journal it resumed from.
+		fileAllComplete(t)
+		var log bytes.Buffer
+		head := false
+		if err := ScanWithOptions(16<<10, path, Options{CheckpointPath: ckpt, Resume: resume, Log: &log},
+			func(d Detection) {
+				if d.Offset == 100 {
+					head = true
+				}
+			}, nil); err != nil {
+			t.Fatalf("scan (resume=%v): %v\n%s", resume, err, log.String())
+		}
+		return head, log.String()
+	}
+	t.Run("resume restarts loudly", func(t *testing.T) {
+		head, log := scan(t, true)
+		if !head {
+			t.Fatal("Resume with no active entry skipped the head: silent suffix-only success")
+		}
+		if !strings.Contains(log, "no active entry") {
+			t.Fatalf("must warn no active entry, got:\n%s", log)
+		}
+	})
+	t.Run("explicit start stands quietly", func(t *testing.T) {
+		head, log := scan(t, false)
+		if head {
+			t.Fatal("explicit caller start must be honored, not restarted")
+		}
+		if strings.Contains(log, "WARNING") {
+			t.Fatalf("explicit start with no journal case must stay quiet, got:\n%s", log)
+		}
+	})
+}
+
+// The banked-members warning fires only when banked bytes really
+// re-scan (N2): on honored-start mismatch paths the journal is
+// ignored and its members dropped, so claiming a re-scan lies.
+func TestBankedMembersWarningOnlyOnRescan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.bin")
+	raw := bytes.Repeat([]byte{'x'}, 32<<10)
+	copy(raw[100:], "bestblock")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	ckpt := filepath.Join(dir, "a.cp")
+	other := filepath.Join(dir, "b.bin")
+	scan := func(t *testing.T, resume bool) (bool, string) {
+		t.Helper()
+		// A journal for another path with banked members:
+		// nothing in it can seed this scan. Filed fresh per
+		// scan: a completed run overwrites its journal.
+		writeCheckpoint(nil, ckpt, other, 16<<10,
+			[]string{"member|rootext=0-100"}, testIdent(path), mustProof(t, path, 0, 16<<10))
+		var log bytes.Buffer
+		head := false
+		if err := ScanWithOptions(16<<10, path, Options{CheckpointPath: ckpt, Resume: resume, Log: &log},
+			func(d Detection) {
+				if d.Offset == 100 {
+					head = true
+				}
+			}, nil); err != nil {
+			t.Fatalf("scan (resume=%v): %v\n%s", resume, err, log.String())
+		}
+		return head, log.String()
+	}
+	t.Run("honored start drops the warning", func(t *testing.T) {
+		head, log := scan(t, false)
+		if head {
+			t.Fatal("explicit caller start must be honored")
+		}
+		if !strings.Contains(log, "journal ignored") {
+			t.Fatalf("mismatch must say the journal is ignored, got:\n%s", log)
+		}
+		if strings.Contains(log, "banked members re-scanned") {
+			t.Fatalf("dropped members must not claim a re-scan, got:\n%s", log)
+		}
+	})
+	t.Run("restart keeps the warning", func(t *testing.T) {
+		head, log := scan(t, true)
+		if !head {
+			t.Fatal("Resume mismatch must restart at zero")
+		}
+		if !strings.Contains(log, "banked members re-scanned") {
+			t.Fatalf("restart must warn the re-scan, got:\n%s", log)
+		}
+	})
+}
+
+// A verification open failure refuses loudly and restarts (B2):
+// returning the original nonzero seed would let a later
+// successful root open honor an offset never proven. Transient
+// failure restarts at zero with a warning and seeds nothing;
+// zero start stays at zero but still warns (verification was
+// attempted and errored); persistent failure reaches the root
+// read and errors with a case-log record.
+func TestAdoptResumeOpenFailureRestarts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "openfail.bin")
+	raw := bytes.Repeat([]byte{'x'}, 32<<10)
+	copy(raw[100:], "bestblock")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	const point = 16 << 10
+	ckpt := filepath.Join(dir, "openfail.cp")
+	writeCheckpoint(nil, ckpt, path, point, nil, testIdent(path), mustProof(t, path, 0, point))
+	adopt := func(start int64) (scanTarget, *journalCtl, string, *reviewFirstOpenError) {
+		t.Helper()
+		seed := &reviewFirstOpenError{fileScanTarget: &fileScanTarget{path: path, startOffset: start}}
+		jc := &journalCtl{digest: newBatchDigest()}
+		var log bytes.Buffer
+		got := adoptResume(Options{CheckpointPath: ckpt, Resume: true, Log: &log}, seed, jc, newPubGate(&log))
+		return got, jc, log.String(), seed
+	}
+	t.Run("transient failure restarts with no seeded state", func(t *testing.T) {
+		got, jc, log, seed := adopt(point)
+		if got.StartOffset() != 0 {
+			t.Fatalf("start = %d, want 0 (unverified offset must not survive)", got.StartOffset())
+		}
+		if !strings.Contains(log, "cannot open") || !strings.Contains(log, "rescanning from the start") {
+			t.Fatalf("must warn cannot-open + rescan, got:\n%s", log)
+		}
+		if jc.adopted {
+			t.Fatal("adopted after failed verification")
+		}
+		if jc.preopened != nil {
+			t.Fatal("verified handle preserved after failed verification")
+		}
+		// The retry the probe models now opens at zero: full
+		// coverage, not an honored skip.
+		f, err := got.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		if seed.opens != 2 {
+			t.Fatalf("opens = %d, want 2 (failed verify + root retry)", seed.opens)
+		}
+	})
+	t.Run("zero start warns and stays at zero", func(t *testing.T) {
+		// A sub-overlap journal point continues at run start
+		// 0 (rewind(0, point) == 0), so the claim builds and
+		// the open failure hits the verification path.
+		const tiny = 512
+		tinyCkpt := filepath.Join(dir, "tiny.cp")
+		writeCheckpoint(nil, tinyCkpt, path, tiny, nil, testIdent(path), mustProof(t, path, 0, tiny))
+		seed := &reviewFirstOpenError{fileScanTarget: &fileScanTarget{path: path}}
+		jc := &journalCtl{digest: newBatchDigest()}
+		var log bytes.Buffer
+		got := adoptResume(Options{CheckpointPath: tinyCkpt, Resume: true, Log: &log}, seed, jc, newPubGate(&log))
+		if got.StartOffset() != 0 {
+			t.Fatalf("start = %d, want 0", got.StartOffset())
+		}
+		if !strings.Contains(log.String(), "cannot open") {
+			t.Fatalf("zero-start verification failure must still warn, got:\n%s", log.String())
+		}
+		if jc.adopted || jc.preopened != nil {
+			t.Fatal("failed verification seeded state")
+		}
+	})
+	t.Run("persistent failure errors with a case record", func(t *testing.T) {
+		noperm := filepath.Join(dir, "noperm.bin")
+		if err := os.WriteFile(noperm, raw, 0644); err != nil {
+			t.Fatal(err)
+		}
+		nocp := filepath.Join(dir, "noperm.cp")
+		writeCheckpoint(nil, nocp, noperm, point, nil, testIdent(noperm), mustProof(t, noperm, 0, point))
+		if err := os.Chmod(noperm, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { os.Chmod(noperm, 0644) })
+		if f, err := os.Open(noperm); err == nil {
+			f.Close()
+			t.Skip("platform reads chmod-000 files (Windows/root)")
+		}
+		casePath := filepath.Join(dir, "case.jsonl")
+		var log bytes.Buffer
+		err := ScanWithOptions(point, noperm,
+			Options{CheckpointPath: nocp, CaseLogPath: casePath, ToolVersion: "test", Resume: true, Log: &log},
+			func(Detection) {}, nil)
+		if err == nil {
+			t.Fatalf("unreadable root must error, got nil\n%s", log.String())
+		}
+		if !strings.Contains(log.String(), "cannot open") {
+			t.Fatalf("must warn cannot-open, got:\n%s", log.String())
+		}
+		recs := readCaseLog(t, casePath)
+		if len(recs) != 1 || recs[0].Status == "complete" {
+			t.Fatalf("case records = %+v, want one non-complete record", recs)
+		}
+	})
+}
+
+// Caller-driven resume (doc.go: ReadCheckpoint, pass the offset
+// back, Options.Resume unset) must honor the "rescanning from
+// the start" promise when the journal point is unprovable: a
+// legacy journal, a proof shorter than the filed offset, and a
+// foreign-span proof (an explicit -s skip, never proven bytes)
+// all restart at zero with a warning. Only a start that
+// continues no journal point is an explicit caller assertion,
+// silently honored with no rescan.
+func TestCallerResumeRefusedShapesRescan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "caller.bin")
+	const size = 64 << 10
+	const point = 32 << 10
+	raw := bytes.Repeat([]byte{'x'}, size)
+	copy(raw[100:], "bestblock")
+	copy(raw[40<<10:], "defaultkey")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	scan := func(start int64, ckpt string) ([]Detection, string) {
+		t.Helper()
+		var log bytes.Buffer
+		var dets []Detection
+		if err := ScanWithOptions(start, path, Options{CheckpointPath: ckpt, Log: &log},
+			func(d Detection) { dets = append(dets, d) }, nil); err != nil {
+			t.Fatalf("scan from %d: %v\n%s", start, err, log.String())
+		}
+		return dets, log.String()
+	}
+	head := func(dets []Detection) bool {
+		for _, d := range dets {
+			if d.Offset == 100 {
+				return true
+			}
+		}
+		return false
+	}
+	file := func(name string, proof *PrefixProof) string {
+		t.Helper()
+		ckpt := filepath.Join(dir, name)
+		writeCheckpoint(nil, ckpt, path, point, nil, testIdent(path), proof)
+		return ckpt
+	}
+	for _, arm := range []struct {
+		name  string
+		proof *PrefixProof
+		want  string
+	}{
+		{"legacy journal", nil, "predates content proofs"},
+		{"short proof", mustProof(t, path, 0, point/2), "shorter than the journaled offset"},
+		{"foreign span", mustProof(t, path, point, size-point), "never proven bytes"},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			dets, log := scan(point, file(arm.name+".ckpt", arm.proof))
+			if !strings.Contains(log, arm.want) || !strings.Contains(log, "rescanning from the start") {
+				t.Fatalf("must warn %q + rescan, got:\n%s", arm.want, log)
+			}
+			if !head(dets) {
+				t.Fatalf("head needle lost: warning promised a rescan but start %d was honored (got %d detections)", point, len(dets))
+			}
+		})
+	}
+	t.Run("explicit start elsewhere silently honored", func(t *testing.T) {
+		const start = 20 << 10
+		if start == point || start == rewindOffset(0, point) {
+			t.Fatalf("start %d continues the journal point %d; pick another", start, point)
+		}
+		dets, log := scan(start, file("valid.ckpt", mustProof(t, path, 0, point)))
+		if strings.Contains(log, "rescan") || strings.Contains(log, "WARNING") {
+			t.Fatalf("explicit caller start must stay silent, got:\n%s", log)
+		}
+		if head(dets) {
+			t.Fatal("explicit start honored must not re-report the head needle")
+		}
+		if len(dets) == 0 {
+			t.Fatal("explicit start honored must still scan the tail")
+		}
+	})
+}
+
 // A resumed-then-completed batch entry must certify the FULL
 // stream digest — chained from the verified prefix plus the
 // suffix read this run — so a later skip re-hashes the same
@@ -544,16 +1022,141 @@ func TestAssertedSkipNotJournaled(t *testing.T) {
 // exactly like the zip same-cap case: the first attempt banks
 // the admitted member with its provenance span, the retry defers
 // it and admits the refused one.
+// A filed cover span asserts a member's TRUE bytes: it is not
+// enough for the span to sit inside verified bytes. A journal
+// that banks a member under a span the rediscovered member does
+// not occupy (a hand edit, or a stale key after target bytes
+// moved) must re-read the member with a warning — silently
+// deferring it would skip bytes never read. An honest span that
+// merely sits outside verified bytes re-reads through the
+// existing dropped-seed path with no mismatch warning.
+func TestFiledCoverSpanMismatchRereads(t *testing.T) {
+	var mbuf bytes.Buffer
+	w := gzip.NewWriter(&mbuf)
+	if _, err := w.Write([]byte("bestblock-deep")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const memberAt = 15 << 10
+	const size = 32 << 10
+	raw := bytes.Repeat([]byte{'x'}, size)
+	copy(raw[memberAt:], mbuf.Bytes())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "span.bin")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// The real banked key, built from the real constructors: the
+	// forgery below differs ONLY in the span. (A wrong base key
+	// could never defer, so the warning assertion below guards
+	// the test against its own key drift.)
+	base := coverKeyOf(&gzipScanTarget{source: &fileScanTarget{path: path}, gzipOffset: memberAt})
+	const point = 8 << 10
+	ckpt := filepath.Join(dir, "span.cp")
+	writeCheckpoint(nil, ckpt, path, point,
+		[]string{fmt.Sprintf("%s%s0-100", base, rootExtSuffix)},
+		testIdent(path), mustProof(t, path, 0, point))
+	var log bytes.Buffer
+	nested := 0
+	if err := ScanWithOptions(point, path, Options{CheckpointPath: ckpt, Log: &log},
+		func(d Detection) {
+			if d.Target != path {
+				nested++
+			}
+		}, nil); err != nil {
+		t.Fatalf("resume: %v\n%s", err, log.String())
+	}
+	if nested == 0 {
+		t.Fatal("member silently deferred under a span it does not occupy: 0 nested hits vs 1 on a fresh scan")
+	}
+	if !strings.Contains(log.String(), "provenance span") || !strings.Contains(log.String(), "re-scanned") {
+		t.Fatalf("span mismatch must warn, got:\n%s", log.String())
+	}
+}
+
+// A journal that files one member under two spans drops the
+// member entirely (B1): conflicting provenance has no unique
+// span to retain, so the member re-reads with a conflict
+// warning — never defers under either span.
+func TestFiledCoverConflictsRereadLoudly(t *testing.T) {
+	var mbuf bytes.Buffer
+	w := gzip.NewWriter(&mbuf)
+	if _, err := w.Write([]byte("bestblock-deep")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const memberAt = 15 << 10
+	const size = 32 << 10
+	raw := bytes.Repeat([]byte{'x'}, size)
+	copy(raw[memberAt:], mbuf.Bytes())
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dup.bin")
+	if err := os.WriteFile(path, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	base := coverKeyOf(&gzipScanTarget{source: &fileScanTarget{path: path}, gzipOffset: memberAt})
+	const point = 8 << 10
+	ckpt := filepath.Join(dir, "dup.cp")
+	writeCheckpoint(nil, ckpt, path, point,
+		[]string{
+			fmt.Sprintf("%s%s0-100", base, rootExtSuffix),
+			fmt.Sprintf("%s%s%d-%d", base, rootExtSuffix, memberAt, memberAt+100),
+		},
+		testIdent(path), mustProof(t, path, 0, point))
+	var log bytes.Buffer
+	nested := 0
+	if err := ScanWithOptions(point, path, Options{CheckpointPath: ckpt, Log: &log},
+		func(d Detection) {
+			if d.Target != path {
+				nested++
+			}
+		}, nil); err != nil {
+		t.Fatalf("resume: %v\n%s", err, log.String())
+	}
+	if nested == 0 {
+		t.Fatal("conflicted member deferred: 0 nested hits vs 1 on a fresh scan")
+	}
+	if !strings.Contains(log.String(), "conflicting spans") {
+		t.Fatalf("conflict must warn precisely, got:\n%s", log.String())
+	}
+	if strings.Contains(log.String(), "outside verified bytes") {
+		t.Fatalf("conflict must not misreport as outside-verified, got:\n%s", log.String())
+	}
+}
+
 func TestGzipProvenanceConverges(t *testing.T) {
 	old := maxOutstandingPubs
 	defer func() { maxOutstandingPubs = old }()
 	maxOutstandingPubs = 1
 
-	gzMember := func(t *testing.T, content string) []byte {
+	// Attempt-1 congestion here is timing-based with a wide
+	// margin, not synchronized: cap slots release when
+	// scanBlocks RECEIVES a target, but its loop then blocks
+	// reading that member's bulk bytes, so the back-to-back
+	// members' publishes (microseconds apart) pile onto the
+	// outstanding count and refuse. A producer stall spanning
+	// the millisecond read window would admit everything and
+	// fail the attempt-1 congestion assertion below; endangered
+	// only in theory (10/10 at GOMAXPROCS=8 plus every gate
+	// run). What the test proves regardless of interleaving:
+	// same-cap retries converge, every member is covered, every
+	// filed span is valid, and nested hits emit exactly once.
+	// Process restart is the kill tests' contract, not this one's.
+	gzMember := func(t *testing.T, tag string) []byte {
 		t.Helper()
 		var buf bytes.Buffer
 		w := gzip.NewWriter(&buf)
-		if _, err := w.Write([]byte(content)); err != nil {
+		if _, err := w.Write([]byte(tag)); err != nil {
+			t.Fatal(err)
+		}
+		// Bulk zeros: milliseconds to read through the
+		// single scanBlocks loop, microseconds to discover
+		// (compressed bytes stay tiny). Zeros carry no needle.
+		if _, err := w.Write(make([]byte, 8<<20)); err != nil {
 			t.Fatal(err)
 		}
 		if err := w.Close(); err != nil {
@@ -561,28 +1164,37 @@ func TestGzipProvenanceConverges(t *testing.T) {
 		}
 		return buf.Bytes()
 	}
-	// Back-to-back members in one block: discovery publishes
-	// both while the root read holds the channel, so the second
-	// is deterministically refused at cap 1.
-	m1 := gzMember(t, "bestblock-one")
-	m2 := gzMember(t, "bestblock-two")
-	raw := append(append([]byte{}, m1...), m2...)
+	var raw []byte
+	var members [][]byte
+	for i := 0; i < 4; i++ {
+		m := gzMember(t, fmt.Sprintf("bestblock-%d", i))
+		members = append(members, m)
+		raw = append(raw, m...)
+	}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "two.gz")
+	path := filepath.Join(dir, "four.gz")
 	if err := os.WriteFile(path, raw, 0644); err != nil {
 		t.Fatal(err)
 	}
 	ckpt := filepath.Join(dir, "gz.cp")
 	nested := func(d Detection) bool { return d.Target != path }
+	// Triples, not pairs: one member read emits its whole
+	// trailing multistream (member 0's stream carries all four
+	// tags), so (target, needle) repeats within a single honest
+	// read. A repeated TRIPLE, though, is a re-read of banked
+	// bytes — the replay this pins against.
+	seen := map[string]bool{}
+	emitted := 0
+	note := func(d Detection) {
+		if nested(d) {
+			emitted++
+			seen[fmt.Sprintf("%s/%s/%d", d.Target, d.Needle, d.Offset)] = true
+		}
+	}
 
 	var log1 bytes.Buffer
-	seen := map[string]bool{}
 	err := ScanWithOptions(0, path, Options{Log: &log1, CheckpointPath: ckpt},
-		func(d Detection) {
-			if nested(d) {
-				seen[d.Target+"/"+d.Needle] = true
-			}
-		}, func(ProgressInfo) {})
+		func(d Detection) { note(d) }, func(ProgressInfo) {})
 	if err == nil || !strings.Contains(err.Error(), "incomplete coverage") {
 		t.Fatalf("attempt 1: want congestion error, got %v\n%s", err, log1.String())
 	}
@@ -590,32 +1202,59 @@ func TestGzipProvenanceConverges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cp.Covered) != 1 {
-		t.Fatalf("attempt 1 covered = %v, want the one admitted member", cp.Covered)
+	if len(cp.Covered) < 1 {
+		t.Fatalf("attempt 1 covered = %v, want at least one admitted member", cp.Covered)
 	}
-	_, s, e, ok := coverProvenance(cp.Covered[0])
-	if !ok {
-		t.Fatalf("banked gzip key has no provenance: %q", cp.Covered[0])
+	// Every banked span starts at a real member offset, covers
+	// at least its member's compressed bytes (plus bounded
+	// reader readahead), and stays inside the stream.
+	starts := map[int64]int64{}
+	var off int64
+	for _, m := range members {
+		starts[off] = off + int64(len(m))
+		off += int64(len(m))
 	}
-	// The span covers the member (plus bounded reader readahead)
-	// and stays inside the stream.
-	if s != 0 || e < int64(len(m1)) || e > int64(len(raw)) {
-		t.Fatalf("gzip span = %d-%d, want [0, >=%d) within %d", s, e, len(m1), len(raw))
+	for _, k := range cp.Covered {
+		_, s, e, ok := coverProvenance(k)
+		if !ok {
+			t.Fatalf("banked gzip key has no provenance: %q", k)
+		}
+		minEnd, known := starts[s]
+		if !known || e < minEnd || e > int64(len(raw)) {
+			t.Fatalf("gzip span = %d-%d, want a member start with end inside [member end, %d]", s, e, len(raw))
+		}
 	}
-	// Retry at the same cap defers the banked member and admits
-	// the refused one.
-	var log2 bytes.Buffer
+	// Same-cap retries defer the banked members and admit the
+	// refused ones, converging to clean completion whatever
+	// each attempt's admitted/refused split is.
+	complete := false
 	start := cp.Offset
-	err = ScanWithOptions(start, path, Options{Log: &log2, CheckpointPath: ckpt},
-		func(d Detection) {
-			if nested(d) {
-				seen[d.Target+"/"+d.Needle] = true
-			}
-		}, func(ProgressInfo) {})
-	if err != nil {
-		t.Fatalf("attempt 2: %v\n%s", err, log2.String())
+	for attempt := 2; attempt <= 5; attempt++ {
+		var lb bytes.Buffer
+		err = ScanWithOptions(start, path, Options{Log: &lb, CheckpointPath: ckpt},
+			func(d Detection) { note(d) }, func(ProgressInfo) {})
+		cp, rerr := ReadCheckpoint(ckpt)
+		if rerr != nil {
+			t.Fatalf("attempt %d: journal unreadable: %v\n%s", attempt, rerr, lb.String())
+		}
+		start = cp.Offset
+		if err == nil {
+			complete = true
+			break
+		}
+		if !strings.Contains(err.Error(), "incomplete coverage") {
+			t.Fatalf("attempt %d: error = %v, want honest incomplete-coverage signal\n%s", attempt, err, lb.String())
+		}
 	}
-	if len(seen) != 2 {
-		t.Fatalf("unique nested = %d, want 2 (retry must admit the refused member)", len(seen))
+	if !complete {
+		t.Fatalf("same-cap retries never completed in 5 attempts; unique %d/10 — retries replay instead of converging", len(seen))
+	}
+	// Four members multistream to 4+3+2+1 = 10 triples: every
+	// member covered through its own read.
+	if len(seen) != 10 {
+		t.Fatalf("unique nested triples = %d, want 10 (every member covered)", len(seen))
+	}
+	if emitted != len(seen) {
+		t.Fatalf("nested emitted = %d but unique = %d: a banked member re-read instead of deferring", emitted, len(seen))
 	}
 }

@@ -368,8 +368,19 @@ func main() {
 		cp, err := detector.ReadCheckpoint(*checkpointPath)
 		if err != nil {
 			if os.IsNotExist(err) {
+				// -resume overrides -s even when the
+				// checkpoint is missing: the announcement
+				// promises the beginning, so the start
+				// must be zero, not the flag's offset.
 				fmt.Fprintf(os.Stderr, "[main] No checkpoint at %s, starting from the beginning\n", *checkpointPath)
+				start = 0
 			} else {
+				// A requested resume that cannot even read
+				// its journal aborts loudly and records the
+				// attempt: exiting without a case entry
+				// would hide a failed recovery step.
+				attemptOpts := detector.Options{CaseLogPath: *caseLog, ToolVersion: version, Flags: os.Args[1:], CheckpointPath: *checkpointPath}
+				err = detector.RecordAttempt(attemptOpts, path, err)
 				fmt.Fprintf(os.Stderr, "[main] Exiting due to error: %s\n", err.Error())
 				os.Exit(1)
 			}
@@ -390,14 +401,16 @@ func main() {
 			// offset-overlap so needles straddling the 1MB
 			// journal point still match; the announcement and
 			// percent below name the rewound point actually
-			// scanned. -s keeps its exact offset and never
-			// rewinds. The detector verifies the frontier
-			// proof on its own handle before honoring it —
-			// replaced bytes rescan from zero instead of
-			// skipping contents never read. Main only
-			// pre-screens the cheap tier so the announcement
-			// names the likely point; a pass here authorizes
-			// nothing.
+			// scanned. -resume overrides -s: the rewound
+			// journal point wins over the flag's exact
+			// offset (a fresh -s scan with no -resume keeps
+			// its offset and never rewinds). The detector
+			// verifies the frontier proof on its own handle
+			// before honoring it — replaced bytes rescan
+			// from zero instead of skipping contents never
+			// read. Main only pre-screens the cheap tier so
+			// the announcement names the likely point; a
+			// pass here authorizes nothing.
 			if reject, note := detector.CheapTierReject(cp.Ident, path); reject {
 				fmt.Fprintf(os.Stderr, "[main] WARNING: %s\n", note)
 				start = 0
@@ -1444,12 +1457,15 @@ func runWatch(path, outPath, format string, count int, endpoint string) {
 	}
 	pubs, privFound := watchInputKeys(buf, path)
 	if len(pubs) == 0 {
+		// Readable-but-keyless input is a completed answer on
+		// stdout (exit 0), matching -hashes/-salvage: only the
+		// private-material refusal stays a loud exit 1.
 		if privFound {
 			fmt.Fprintf(os.Stderr, "[watch] Exiting due to error: found only private extended keys — findbtc never derives from private material (move the key to an offline machine and sweep to a fresh wallet)\n")
-		} else {
-			fmt.Fprintf(os.Stderr, "[watch] Exiting due to error: no extended public keys in %s\n", path)
+			os.Exit(1)
 		}
-		os.Exit(1)
+		fmt.Printf("No extended public keys in %s\n", path)
+		return
 	}
 	entries, err := detector.CollectWatchAddrs(pubs, count)
 	if err != nil {
