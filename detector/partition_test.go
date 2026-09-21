@@ -331,6 +331,46 @@ func composeFATDisk(t *testing.T, scheme string) (string, []int64) {
 	return path, starts
 }
 
+// composeMixedDisk builds the Goal 45 fixture: a partitioned disk with
+// the synthetic FAT32 volume at 1MiB and the synthetic ext volume at
+// 34MiB (past the 32.5MiB FAT32 image). Both volumes hold deleted
+// wallet markers, so a kill lands mid-list only past volume 1.
+func composeMixedDisk(t *testing.T, scheme string) (string, []int64) {
+	t.Helper()
+	fatImg, err := os.ReadFile(buildTestFAT32(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extImg, err := os.ReadFile(buildTestExt(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mb = 1024 * 1024
+	disk := make([]byte, 36*mb)
+	copy(disk[mb:], fatImg)
+	copy(disk[34*mb:], extImg)
+	starts := []int64{mb, 34 * mb}
+	fatSecs := uint32(len(fatImg) / 512)
+	extSecs := uint32(len(extImg) / 512)
+	switch scheme {
+	case "mbr":
+		putMBRSlot(disk, 0, 0x0C, 2048, fatSecs)
+		putMBRSlot(disk, 1, 0x83, uint32(34*mb/512), extSecs)
+	case "gpt":
+		putGPT(disk, []gptTestEntry{
+			{guidBasicData, 2048, uint64(2048 + fatSecs - 1), "fat-vol"},
+			{guidLinuxFS, 34 * mb / 512, 34*mb/512 + uint64(extSecs) - 1, "ext-vol"},
+		})
+	default:
+		t.Fatalf("unknown scheme %q", scheme)
+	}
+	path := filepath.Join(t.TempDir(), scheme+"-mixed.img")
+	if err := os.WriteFile(path, disk, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path, starts
+}
+
 // Auto-seed must find FAT + exFAT partitions by content (MBR type 0x07
 // covers both NTFS and exFAT, so probing — not the type byte — decides).
 func TestScanFSVolumesAutoSeedFAT(t *testing.T) {

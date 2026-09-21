@@ -106,80 +106,108 @@ func ScanFSVolumes(path string, base int64, autoSeed bool, opts Options, onDetec
 	if err != nil {
 		return nil, recordAttempt(opts, path, err)
 	}
-	if len(targets) > 1 && (opts.CheckpointPath != "" || opts.Resume) {
-		return nil, recordAttempt(opts, path, fmt.Errorf("%s: checkpointing is not supported across %d auto-seeded volumes in one journal; pin one volume with -fs-offset", path, len(targets)))
+	// One flattened deleted-entry range list spans every volume (the
+	// unallocated precedent): a single (range_index, offset) journal
+	// covers the whole run and resume validates the full list, so a
+	// range list changed in ANY volume refuses loudly.
+	kinds, ranges, owners, err := flattenDeletedRanges(path, targets, onEntry)
+	if err != nil {
+		return kinds, recordAttempt(opts, path, err)
 	}
-	var kinds []string
-	for _, t := range targets {
-		kind, err := scanOneVolume(path, t.base, opts, onDetection, onProgress, onEntry)
-		if err != nil {
-			return kinds, err
-		}
-		kinds = append(kinds, kind)
+	// A fresh empty run needs no pipeline; a resume must still validate its
+	// existing journal against the current list, including an empty list.
+	if len(ranges) == 0 && !opts.Resume {
+		return kinds, nil
+	}
+	// Stamping follows the range index, not an offset search: the
+	// driver reports each range as its pipeline starts, so a hit is
+	// owned by the range being scanned however the list overlaps.
+	ro := &rangeOwner{ranges: ranges, owners: owners, cur: -1}
+	opts.onRange = ro.onRange
+
+	err = ScanRangesWithOptions(path, ranges, opts, func(d Detection) {
+		d.FileName = ro.ownerOf(d.Offset)
+		onDetection(d)
+	}, onProgress)
+	if err != nil {
+		return kinds, err
 	}
 	return kinds, nil
 }
 
-// scanOneVolume inventories and scans the single volume at base.
-func scanOneVolume(path string, base int64, opts Options, onDetection func(Detection), onProgress func(ProgressInfo), onEntry func(kind string, e FSEntry)) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", recordAttempt(opts, path, fmt.Errorf("cannot open %s: %w", path, err))
+// rangeOwner stamps detections with the filename owning the range
+// being scanned. The index (reported by the range driver as each
+// pipeline starts) wins over offset containment, so overlapping
+// ranges attribute exactly; the offset search survives only as a
+// fallback for detections that arrive with no range started.
+type rangeOwner struct {
+	ranges []FSExtent
+	owners []string
+	cur    int
+}
+
+func (o *rangeOwner) onRange(index int) {
+	o.cur = index
+}
+
+func (o *rangeOwner) ownerOf(offset int64) string {
+	if o.cur >= 0 && o.cur < len(o.owners) {
+		return o.owners[o.cur]
 	}
-	kind, vol, err := OpenFS(f, base)
-	if err != nil {
-		f.Close()
-		return "", recordAttempt(opts, path, err)
-	}
-	entries, err := vol.Entries()
-	if err != nil {
-		f.Close()
-		return "", recordAttempt(opts, path, err)
-	}
-	f.Close()
-	for _, e := range entries {
-		if onEntry != nil {
-			onEntry(kind, e)
+	for i, r := range o.ranges {
+		if offset >= r.Start && offset < r.Start+r.Len {
+			return o.owners[i]
 		}
 	}
-	// Deleted entries scan as one flattened range list (not one journal
-	// per entry), so a single (range_index, offset) journal covers the
-	// whole volume and resume validates the full list. Filenames stamp
-	// by range ownership instead of by per-entry closure.
+	return ""
+}
+
+// flattenDeletedRanges inventories every target in scan order (firing
+// onEntry per volume as it goes) and flattens the volumes'
+// deleted-entry content extents into one range list with per-range
+// filename owners. kinds[i] is the filesystem label of targets[i].
+// A single volume flattens to exactly the list it always journaled,
+// so single-volume runs are byte-identical to before.
+func flattenDeletedRanges(path string, targets []volumeTarget, onEntry func(kind string, e FSEntry)) ([]string, []FSExtent, []string, error) {
+	var kinds []string
 	var ranges []FSExtent
 	var owners []string
-	for _, e := range entries {
-		if !e.Deleted || len(e.Extents) == 0 {
-			continue
+	for _, t := range targets {
+		f, err := os.Open(path)
+		if err != nil {
+			return kinds, nil, nil, fmt.Errorf("cannot open %s: %w", path, err)
 		}
-		label := e.Name
-		if label == "" {
-			label = e.Note
+		kind, vol, err := OpenFS(f, t.base)
+		if err != nil {
+			f.Close()
+			return kinds, nil, nil, err
 		}
-		ranges = append(ranges, e.Extents...)
-		for range e.Extents {
-			owners = append(owners, label)
+		entries, err := vol.Entries()
+		f.Close()
+		if err != nil {
+			return kinds, nil, nil, err
 		}
-	}
-	if len(ranges) == 0 {
-		return kind, nil
-	}
-	ownerOf := func(offset int64) string {
-		for i, r := range ranges {
-			if offset >= r.Start && offset < r.Start+r.Len {
-				return owners[i]
+		for _, e := range entries {
+			if onEntry != nil {
+				onEntry(kind, e)
 			}
 		}
-		return ""
+		kinds = append(kinds, kind)
+		for _, e := range entries {
+			if !e.Deleted || len(e.Extents) == 0 {
+				continue
+			}
+			label := e.Name
+			if label == "" {
+				label = e.Note
+			}
+			ranges = append(ranges, e.Extents...)
+			for range e.Extents {
+				owners = append(owners, label)
+			}
+		}
 	}
-	err = ScanRangesWithOptions(path, ranges, opts, func(d Detection) {
-		d.FileName = ownerOf(d.Offset)
-		onDetection(d)
-	}, onProgress)
-	if err != nil {
-		return kind, err
-	}
-	return kind, nil
+	return kinds, ranges, owners, nil
 }
 
 // UnallocatedRanges returns the free-space extents of the filesystem at

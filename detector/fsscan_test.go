@@ -231,6 +231,149 @@ func TestScanFSVolumesSingleVolumeCheckpointRoundTrip(t *testing.T) {
 	}
 }
 
+// A multi-volume run with no deleted ranges anywhere journals nothing:
+// flattening an empty list is not a journalable run.
+func TestScanFSVolumesMultiVolumeNoRangesNoJournal(t *testing.T) {
+	disk, starts := composeMixedDisk(t, "mbr")
+	raw, err := os.ReadFile(disk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Relink ext's deleted inodes (volume 2): live entries inventory
+	// but never scan.
+	for _, num := range []int64{13, 14, 15, 16} {
+		at := starts[1] + 4*extTestBlock + (num-1)*128 + 26
+		raw[at], raw[at+1] = 1, 0
+	}
+	// End the FAT32 root walk at the first deleted slot (volume 1).
+	g := fat32Geometry()
+	root := starts[0] + g.clustOff(2)
+	for slot := int64(0); ; slot++ {
+		s := raw[root+slot*32 : root+(slot+1)*32]
+		if s[0] == 0x00 {
+			break
+		}
+		if s[0] == 0xE5 {
+			s[0] = 0x00
+			break
+		}
+	}
+	if err := os.WriteFile(disk, raw, 0644); err != nil {
+		t.Fatal(err)
+	}
+	ckpt := filepath.Join(t.TempDir(), "c.json")
+	kinds, err := ScanFSVolumes(disk, 0, true, Options{CheckpointPath: ckpt},
+		func(d Detection) { t.Errorf("range-less run detected %+v", d) },
+		func(ProgressInfo) {}, func(string, FSEntry) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(kinds) != 2 {
+		t.Fatalf("kinds %v, want both volumes inventoried", kinds)
+	}
+	if _, err := os.Stat(ckpt); !os.IsNotExist(err) {
+		t.Errorf("range-less multi-volume run journaled: stat err %v", err)
+	}
+}
+
+// The range index owns the stamp, not offset containment: a needle
+// inside two overlapping ranges attributes to the range being
+// scanned. (Unreachable via FS parsers — extents are
+// volume-confined — but the flattened list must stay exact if that
+// ever changes.) Wired exactly like ScanFSVolumes wires it.
+func TestScanFSVolumesOverlapStampsByIndex(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlap.bin")
+	buf := make([]byte, 4096)
+	copy(buf[160:], "bestblock")
+	if err := os.WriteFile(path, buf, 0644); err != nil {
+		t.Fatal(err)
+	}
+	ranges := []FSExtent{{Start: 100, Len: 100}, {Start: 150, Len: 100}}
+	ro := &rangeOwner{ranges: ranges, owners: []string{"vol1file", "vol2file"}, cur: -1}
+	var fired []int
+	inner := ro.onRange
+	opts := Options{onRange: func(i int) {
+		fired = append(fired, i)
+		inner(i)
+	}}
+	var dets []Detection
+	if err := ScanRangesWithOptions(path, ranges, opts, func(d Detection) {
+		d.FileName = ro.ownerOf(d.Offset)
+		dets = append(dets, d)
+	}, func(ProgressInfo) {}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fired) != 2 || fired[0] != 0 || fired[1] != 1 {
+		t.Fatalf("onRange fired %v, want [0 1]", fired)
+	}
+	if len(dets) != 2 {
+		t.Fatalf("%d detections, want the overlap needle twice: %v", len(dets), dets)
+	}
+	if dets[0].FileName != "vol1file" || dets[1].FileName != "vol2file" {
+		t.Errorf("owners %q,%q, want vol1file then vol2file: %+v",
+			dets[0].FileName, dets[1].FileName, dets)
+	}
+}
+
+// rangeOwner unit contract: the started index wins over containment;
+// with no range started the offset search is the fallback.
+func TestRangeOwnerIndexWins(t *testing.T) {
+	ranges := []FSExtent{{Start: 100, Len: 100}, {Start: 150, Len: 100}}
+	ro := &rangeOwner{ranges: ranges, owners: []string{"a", "b"}, cur: -1}
+	if got := ro.ownerOf(160); got != "a" {
+		t.Errorf("fallback ownerOf(160) = %q, want a", got)
+	}
+	ro.onRange(1)
+	if got := ro.ownerOf(160); got != "b" {
+		t.Errorf("indexed ownerOf(160) = %q, want b", got)
+	}
+	if got := ro.ownerOf(9999); got != "b" {
+		t.Errorf("indexed ownerOf(outside) = %q, want b", got)
+	}
+}
+
+// Case-log records stay per scanned range in flattened volume order —
+// exactly what the sequential per-volume runs wrote — and verify
+// agrees with every record.
+func TestScanFSVolumesMultiVolumeCaseLog(t *testing.T) {
+	disk, _ := composeDisk(t, "mbr")
+	targets, err := resolveVolumes(disk, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ranges, _, err := flattenDeletedRanges(disk, targets, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(t.TempDir(), "case.jsonl")
+	if _, err := ScanFSVolumes(disk, 0, true,
+		Options{CaseLogPath: logPath, ToolVersion: "test"},
+		func(Detection) {}, func(ProgressInfo) {}, func(string, FSEntry) {}); err != nil {
+		t.Fatal(err)
+	}
+	recs := readCaseLog(t, logPath)
+	if len(recs) != len(ranges) {
+		t.Fatalf("%d case-log records, want one per range (%d)", len(recs), len(ranges))
+	}
+	for i, r := range recs {
+		if r.Status != "complete" {
+			t.Errorf("record %d status %q, want complete", i, r.Status)
+		}
+		if r.Source.Kind != "range" {
+			t.Errorf("record %d kind %q, want range", i, r.Source.Kind)
+		}
+		if r.Source.StartOffset != ranges[i].Start || r.Source.Size != ranges[i].Start+ranges[i].Len {
+			t.Errorf("record %d covers [%d,%d), want range %+v",
+				i, r.Source.StartOffset, r.Source.Size, ranges[i])
+		}
+	}
+	var out strings.Builder
+	if err := VerifyCaseLog(logPath, &out); err != nil {
+		t.Errorf("verify: %v\n%s", err, out.String())
+	}
+}
+
 func TestReportShowsFileName(t *testing.T) {
 	d := Detection{Description: "x", Needle: "bestblock", Offset: 9, Target: "img",
 		BlockOffset: 0, MatchLen: 9, FileName: "wallet.dat"}

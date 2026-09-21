@@ -632,6 +632,33 @@ func TestCheckpointUnwritableWarns(t *testing.T) {
 	}
 }
 
+// A batch run with an unwritable journal scans everything anyway:
+// exit 0, every target's hits, and a loud warning — never a fail,
+// never a silent skip (skips need journaled proof, which a missing
+// journal cannot supply).
+func TestBatchCheckpointUnwritableWarns(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.bin")
+	b := filepath.Join(dir, "b.bin")
+	if err := os.WriteFile(a, []byte("bestblock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte("defaultkey"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bad := filepath.Join(dir, "missing-dir", "batch.cp")
+	stdout, stderr, exit := runTestBinary(t, "-json", "-checkpoint", bad, a, b)
+	if exit != 0 {
+		t.Fatalf("exit %d, want 0 despite unwritable journal\n%s", exit, stderr)
+	}
+	if !strings.Contains(stdout, "bestblock") || !strings.Contains(stdout, "defaultkey") {
+		t.Errorf("hits lost with unwritable journal: %q", stdout)
+	}
+	if !strings.Contains(stderr, "[checkpoint] warning") {
+		t.Errorf("stderr lacks checkpoint warning\n%s", stderr)
+	}
+}
+
 // Single-target resume continues carve numbering past pre-kill
 // carves instead of overwriting them: run to completion, resume
 // (which re-covers the tail window), and every run-1 carve must
