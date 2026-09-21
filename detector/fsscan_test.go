@@ -91,7 +91,7 @@ func TestScanFSExt(t *testing.T) {
 }
 
 // ScanFS over the synthetic FAT32 image: the deleted entry's surviving
-// prefix scans and its hits carry the mangled (first char lost) name.
+// prefix scans and its hits carry the recovered long name.
 func TestScanFSFAT(t *testing.T) {
 	path := buildTestFAT32(t)
 	var inventory []FSEntry
@@ -112,7 +112,7 @@ func TestScanFSFAT(t *testing.T) {
 		if e.Name == "LIVE.TXT" && !e.Deleted {
 			foundLive = true
 		}
-		if e.Name == "?ELETED.BIN" && e.Deleted {
+		if e.Name == "deleted wallet backup.dat" && e.Deleted {
 			foundDel = true
 		}
 	}
@@ -121,12 +121,12 @@ func TestScanFSFAT(t *testing.T) {
 	}
 	var named []Detection
 	for _, d := range dets {
-		if d.FileName == "?ELETED.BIN" {
+		if d.FileName == "deleted wallet backup.dat" {
 			named = append(named, d)
 		}
 	}
 	if len(named) != 1 {
-		t.Fatalf("?ELETED.BIN hits %v, want 1 bestblock", dets)
+		t.Fatalf("deleted wallet backup.dat hits %v, want 1 bestblock", dets)
 	}
 }
 

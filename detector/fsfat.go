@@ -15,8 +15,10 @@ import (
 // Strictness is deliberate: the BPB checks (signature, geometry,
 // media, "FAT12/16/32" type string) must all pass, so random bytes
 // and prose refuse as non-volumes (the per-format FP bar). Deleted
-// entries report 8.3-derived names ('?' for the lost first byte);
-// long-name recovery for deleted entries is a known recall gap.
+// entries whose LFN slot run survives report the assembled long name
+// (positional association, LFN self-consistency gated); entries with
+// no surviving run report 8.3-derived names ('?' for the lost first
+// byte) — never a guessed first byte.
 
 // FAT type by data-cluster count (Microsoft thresholds).
 const (
@@ -295,6 +297,12 @@ func assembleLFN(parts [][]byte) (name string, ok bool) {
 		}
 		units = append(units, lfnChars(parts[i])...)
 	}
+	return lfnDecode(units)
+}
+
+// lfnDecode turns ordered UCS-2LE units into a name; ok is false when
+// nothing survives the NUL-terminator and filler strip.
+func lfnDecode(units []uint16) (name string, ok bool) {
 	// Strip NUL terminator and filler.
 	for i, u := range units {
 		if u == 0x0000 {
@@ -312,6 +320,57 @@ func assembleLFN(parts [][]byte) (name string, ok bool) {
 		return "", false
 	}
 	return string(utf16.Decode(trimmed)), true
+}
+
+// assembleDeletedLFN recovers the long name of a deleted entry from its
+// positionally-associated LFN run (the slots immediately preceding the
+// short entry, same as the live path). Real deletion stamps 0xE5 over
+// the LFN sequence bytes too, so fully-intact runs face exactly the
+// live bar first, and the fallback infers destroyed sequence numbers
+// from position (disk order is N..1): stamped slots are accepted,
+// intact slots must match that expectation, including the 0x40
+// last-slot flag on the first-on-disk slot only.
+//
+// Every slot's checksum byte must agree with the rest of the run: a
+// disagreeing slot means partial overwrite, and the run is refused
+// rather than truncated (fls reports a mid-word truncation there; an
+// honest '?' short beats a half-name that looks complete). Intact
+// slots whose sequence number or last-slot flag contradicts the
+// positional expectation refuse the same way, for the same reason.
+//
+// The short-entry checksum is deliberately NOT verified: it covers the
+// destroyed first byte, so exactly one first-byte value always
+// satisfies it — the check is vacuous unless the byte is constrained,
+// and constraining it would be guessing. fls likewise attaches deleted
+// runs positionally (verified: it reports even a stale run's name).
+func assembleDeletedLFN(parts [][]byte) (name string, ok bool) {
+	if len(parts) == 0 {
+		return "", false
+	}
+	for _, p := range parts[1:] {
+		if p[13] != parts[0][13] {
+			return "", false
+		}
+	}
+	if name, ok := assembleLFN(parts); ok {
+		return name, true
+	}
+	n := len(parts)
+	units := make([]uint16, 0, n*13)
+	inferred := false
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := parts[i]
+		if p[0] == 0xE5 {
+			inferred = true
+		} else if seq, last := int(p[0]&0x1F), p[0]&0x40 != 0; seq != n-i || last != (i == 0) {
+			return "", false
+		}
+		units = append(units, lfnChars(p)...)
+	}
+	if !inferred {
+		return "", false
+	}
+	return lfnDecode(units)
 }
 
 // Entries inventories files (live and deleted) with cluster-chain
@@ -352,10 +411,12 @@ func (v *fatVol) Entries() ([]FSEntry, error) {
 				continue
 			}
 			name := ""
-			if !deleted {
-				if n, ok := assembleLFN(lfn); ok {
+			if deleted {
+				if n, ok := assembleDeletedLFN(lfn); ok {
 					name = n
 				}
+			} else if n, ok := assembleLFN(lfn); ok {
+				name = n
 			}
 			lfn = nil
 			short := fatName(s, deleted)

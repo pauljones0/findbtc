@@ -151,6 +151,14 @@ func putLFN(dir []byte, slot int, name, alias11 string) int {
 	return slot + nparts
 }
 
+// delLFN stamps 0xE5 over an LFN run's sequence bytes, the way real FAT
+// deletion leaves surviving slots (fls still recovers these).
+func delLFN(dir []byte, first, nparts int) {
+	for p := 0; p < nparts; p++ {
+		dir[(first+p)*32] = 0xE5
+	}
+}
+
 func fat32Geometry() fatGeometry {
 	// 65536 clusters clears the FAT32 threshold (65525).
 	return fatGeometry{fatBits: 32, bytesPerSec: 512, secPerClust: 1,
@@ -176,6 +184,7 @@ func buildTestFAT32(t *testing.T) string {
 	bin := make([]byte, 600)
 	copy(bin, "bestblock")
 	putClust(4, bin[:512]) // deleted file head; tail cluster freed
+	putClust(5, []byte("gone file\n"))
 	putClust(8, []byte("inner file\n"))
 	putClust(9, []byte("long name content\n"))
 	for _, c := range []int64{2, 3, 7, 8, 9} {
@@ -185,15 +194,21 @@ func buildTestFAT32(t *testing.T) string {
 	// Root dir in cluster 2.
 	root := img[g.clustOff(2) : g.clustOff(2)+g.clustBytes()]
 	putShort(root, 0, "LIVE    TXT", 0x20, 3, 13)
-	putShort(root, 1, "DELETED BIN", 0x20, 4, 600)
-	root[32] = 0xE5 // deleted
-	putShort(root, 2, "SUBDIR     ", 0x10, 7, 0)
+	next := putLFN(root, 1, "deleted wallet backup.dat", "DELETED BIN")
+	delLFN(root, 1, next-1)
+	putShort(root, next, "DELETED BIN", 0x20, 4, 600)
+	root[next*32] = 0xE5 // deleted
+	putShort(root, next+1, "SUBDIR     ", 0x10, 7, 0)
+	// Destroyed-LFN control: no surviving run keeps the '?' short form.
+	// (Cluster 5 stays FAT-zero like the needle head: deleted chains.)
+	putShort(root, next+2, "GONE    TXT", 0x20, 5, 10)
+	root[(next+2)*32] = 0xE5
 	// Subdir in cluster 7.
 	sub := img[g.clustOff(7) : g.clustOff(7)+g.clustBytes()]
 	putShort(sub, 0, ".          ", 0x10, 7, 0)
 	putShort(sub, 1, "..         ", 0x10, 2, 0)
 	putShort(sub, 2, "INNER   TXT", 0x20, 8, 11)
-	next := putLFN(sub, 3, "a rather long file name.dat", "ARATHE~1DAT")
+	next = putLFN(sub, 3, "a rather long file name.dat", "ARATHE~1DAT")
 	putShort(sub, next, "ARATHE~1DAT", 0x20, 9, 18)
 	path := filepath.Join(t.TempDir(), "fat32.img")
 	if err := os.WriteFile(path, img, 0644); err != nil {
@@ -232,10 +247,12 @@ func buildTestFAT16(t *testing.T) string {
 	rootOff := (g.reserved + g.numFATs*g.fatSecs) * g.bytesPerSec
 	root := img[rootOff : rootOff+g.rootEntries*32]
 	putShort(root, 0, "LIVE16  TXT", 0x20, 2, 11)
-	putShort(root, 1, "DEL16   BIN", 0x20, 3, 512)
-	root[32] = 0xE5
-	putShort(root, 2, "SUB16      ", 0x10, 4, 0)
-	next := putLFN(root, 3, "fat16 long name.txt", "FAT16L~1TXT")
+	next := putLFN(root, 1, "old wallet backup.dat", "DEL16   BIN")
+	delLFN(root, 1, next-1)
+	putShort(root, next, "DEL16   BIN", 0x20, 3, 512)
+	root[next*32] = 0xE5
+	putShort(root, next+1, "SUB16      ", 0x10, 4, 0)
+	next = putLFN(root, next+2, "fat16 long name.txt", "FAT16L~1TXT")
 	putShort(root, next, "FAT16L~1TXT", 0x20, 6, 16)
 	sub := img[g.clustOff(4) : g.clustOff(4)+g.clustBytes()]
 	putShort(sub, 0, ".          ", 0x10, 4, 0)
@@ -269,8 +286,10 @@ func buildTestFAT12(t *testing.T) string {
 	rootOff := (g.reserved + g.numFATs*g.fatSecs) * g.bytesPerSec
 	root := img[rootOff : rootOff+g.rootEntries*32]
 	putShort(root, 0, "A       TXT", 0x20, 2, 11)
-	putShort(root, 1, "B       BIN", 0x20, 3, 11)
-	root[32] = 0xE5
+	next := putLFN(root, 1, "gone wall.dat", "B       BIN")
+	delLFN(root, 1, next-1)
+	putShort(root, next, "B       BIN", 0x20, 3, 11)
+	root[next*32] = 0xE5
 	path := filepath.Join(t.TempDir(), "fat12.img")
 	if err := os.WriteFile(path, img, 0644); err != nil {
 		t.Fatal(err)
@@ -315,13 +334,21 @@ func TestFAT32Entries(t *testing.T) {
 	if !ok || live.Deleted || live.Size != 13 || len(live.Extents) != 1 {
 		t.Errorf("live entry: %+v", live)
 	}
-	del, ok := byName["?ELETED.BIN"]
+	del, ok := byName["deleted wallet backup.dat"]
 	if !ok || !del.Deleted || del.Size != 600 {
 		t.Fatalf("deleted entry: %+v", del)
 	}
 	// Chain zeroed: honest prefix (first cluster only).
 	if len(del.Extents) != 1 || del.Extents[0].Len != 512 {
 		t.Errorf("deleted extents %+v, want one 512-byte prefix", del.Extents)
+	}
+	// The mangled 8.3 survives as the second alias, never the name.
+	if len(del.Names) != 2 || del.Names[1] != "?ELETED.BIN" {
+		t.Errorf("deleted aliases %+v, want the long name plus ?ELETED.BIN", del.Names)
+	}
+	// Destroyed-LFN control: no surviving run keeps the '?' short form.
+	if e, ok := byName["?ONE.TXT"]; !ok || !e.Deleted || len(e.Extents) != 1 {
+		t.Errorf("destroyed-LFN control: %+v", e)
 	}
 	inner, ok := byName["INNER.TXT"]
 	if !ok || inner.Deleted {
@@ -347,8 +374,10 @@ func TestFAT16Entries(t *testing.T) {
 	if e, ok := byName["LIVE16.TXT"]; !ok || e.Deleted {
 		t.Errorf("live: %+v", e)
 	}
-	if e, ok := byName["?EL16.BIN"]; !ok || !e.Deleted {
+	if e, ok := byName["old wallet backup.dat"]; !ok || !e.Deleted {
 		t.Errorf("deleted: %+v", e)
+	} else if len(e.Names) != 2 || e.Names[1] != "?EL16.BIN" {
+		t.Errorf("deleted aliases %+v, want the long name plus ?EL16.BIN", e.Names)
 	}
 	if e, ok := byName["fat16 long name.txt"]; !ok {
 		t.Errorf("LFN missing (have %v)", byName)
@@ -369,8 +398,73 @@ func TestFAT12Entries(t *testing.T) {
 	if e, ok := byName["A.TXT"]; !ok || e.Deleted {
 		t.Errorf("live: %+v", e)
 	}
-	if e, ok := byName["?.BIN"]; !ok || !e.Deleted {
+	if e, ok := byName["gone wall.dat"]; !ok || !e.Deleted {
 		t.Errorf("deleted: %+v", e)
+	} else if len(e.Names) != 2 || e.Names[1] != "?.BIN" {
+		t.Errorf("deleted aliases %+v, want the long name plus ?.BIN", e.Names)
+	}
+}
+
+// lfnParts builds an in-memory LFN run for assembleDeletedLFN unit tests.
+func lfnParts(t *testing.T, name, alias11 string) [][]byte {
+	t.Helper()
+	dir := make([]byte, 20*32)
+	end := putLFN(dir, 0, name, alias11)
+	var parts [][]byte
+	for s := 0; s < end; s++ {
+		parts = append(parts, append([]byte{}, dir[s*32:(s+1)*32]...))
+	}
+	return parts
+}
+
+func stampE5(parts [][]byte) {
+	for _, p := range parts {
+		p[0] = 0xE5
+	}
+}
+
+func TestAssembleDeletedLFN(t *testing.T) {
+	const name = "deleted wallet backup.dat"
+	// Fully-intact run (only the short entry was stamped): live bar.
+	if n, ok := assembleDeletedLFN(lfnParts(t, name, "DELETED BIN")); !ok || n != name {
+		t.Errorf("intact run: %q,%v", n, ok)
+	}
+	// Realistic run: every sequence byte stamped 0xE5.
+	e5 := lfnParts(t, name, "DELETED BIN")
+	stampE5(e5)
+	if n, ok := assembleDeletedLFN(e5); !ok || n != name {
+		t.Errorf("E5 run: %q,%v", n, ok)
+	}
+	// Mixed run: one stamped slot, one intact — fls recovers these.
+	mixed := lfnParts(t, name, "DELETED BIN")
+	mixed[0][0] = 0xE5
+	if n, ok := assembleDeletedLFN(mixed); !ok || n != name {
+		t.Errorf("mixed run: %q,%v", n, ok)
+	}
+	// Single-slot run.
+	one := lfnParts(t, "gone wall.dat", "B       BIN")
+	stampE5(one)
+	if n, ok := assembleDeletedLFN(one); !ok || n != "gone wall.dat" {
+		t.Errorf("single slot: %q,%v", n, ok)
+	}
+	// Checksum disagreement (partial overwrite): refuse, keep '?' short.
+	// (Deliberate divergence: fls reports a mid-word truncation here.)
+	bad := lfnParts(t, name, "DELETED BIN")
+	stampE5(bad)
+	bad[0][13] ^= 0xFF
+	if n, ok := assembleDeletedLFN(bad); ok {
+		t.Errorf("bad checksum accepted: %q (must refuse)", n)
+	}
+	// Intact slot contradicting positional order: refuse.
+	seq := lfnParts(t, name, "DELETED BIN")
+	seq[0][0] = 0xE5
+	seq[1][0] = 0x05 // claims sequence 5 in a 2-run
+	if n, ok := assembleDeletedLFN(seq); ok {
+		t.Errorf("bad sequence accepted: %q (must refuse)", n)
+	}
+	// Empty run: refuse.
+	if n, ok := assembleDeletedLFN(nil); ok {
+		t.Errorf("empty run accepted: %q (must refuse)", n)
 	}
 }
 
@@ -448,19 +542,20 @@ func TestFATOracleCrossCheck(t *testing.T) {
 		}
 	}
 	type fixture struct {
-		tskType string
-		build   func(*testing.T) string
-		live    []string // names fls must list
-		deleted string   // deleted name fragment fls must star
-		long    string   // LFN fls must list ("" to skip)
+		tskType     string
+		build       func(*testing.T) string
+		live        []string // names fls must list
+		deletedLong string   // deleted LFN fls must star
+		control     string   // destroyed-LFN short fls must star ("" to skip)
+		long        string   // live LFN fls must list ("" to skip)
 	}
 	for _, fx := range []fixture{
 		{"fat32", buildTestFAT32,
-			[]string{"LIVE.TXT", "SUBDIR", "INNER.TXT"}, "ELETED.BIN", "a rather long file name.dat"},
+			[]string{"LIVE.TXT", "SUBDIR", "INNER.TXT"}, "deleted wallet backup.dat", "_ONE.TXT", "a rather long file name.dat"},
 		{"fat16", buildTestFAT16,
-			[]string{"LIVE16.TXT", "SUB16", "INNER16.TXT"}, "EL16.BIN", "fat16 long name.txt"},
+			[]string{"LIVE16.TXT", "SUB16", "INNER16.TXT"}, "old wallet backup.dat", "", "fat16 long name.txt"},
 		{"fat12", buildTestFAT12,
-			[]string{"A.TXT"}, ".BIN", ""},
+			[]string{"A.TXT"}, "gone wall.dat", "", ""},
 	} {
 		path := fx.build(t)
 		listing := tsk(t, "fls", "-r", "-p", "-f", fx.tskType, path)
@@ -476,9 +571,9 @@ func TestFATOracleCrossCheck(t *testing.T) {
 		starred := false
 		var delInode string
 		for _, line := range strings.Split(listing, "\n") {
-			if strings.Contains(line, "*") && strings.Contains(line, fx.deleted) {
+			if strings.Contains(line, "*") && strings.Contains(line, fx.deletedLong) {
 				starred = true
-				// Line shape: "r/r * 5:  _EL16.BIN".
+				// Line shape: "r/r * 5:  deleted wallet backup.dat".
 				fields := strings.Fields(line)
 				for i, f := range fields {
 					if f == "*" && i+1 < len(fields) {
@@ -488,7 +583,18 @@ func TestFATOracleCrossCheck(t *testing.T) {
 			}
 		}
 		if !starred {
-			t.Errorf("%s: fls lacks starred deleted %q:\n%s", fx.tskType, fx.deleted, listing)
+			t.Errorf("%s: fls lacks starred deleted LFN %q:\n%s", fx.tskType, fx.deletedLong, listing)
+		}
+		if fx.control != "" {
+			found := false
+			for _, line := range strings.Split(listing, "\n") {
+				if strings.Contains(line, "*") && strings.Contains(line, fx.control) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s: fls lacks starred control %q:\n%s", fx.tskType, fx.control, listing)
+			}
 		}
 		stat := tsk(t, "fsstat", "-f", fx.tskType, path)
 		if !strings.Contains(strings.ToUpper(stat), strings.ToUpper(fx.tskType)) {
@@ -521,7 +627,7 @@ func TestFATOracleCrossCheck(t *testing.T) {
 		}
 		found := false
 		for _, e := range entries {
-			if !e.Deleted || !strings.Contains(e.Name, strings.Trim(fx.deleted, ".")) {
+			if !e.Deleted || e.Name != fx.deletedLong {
 				continue
 			}
 			found = true

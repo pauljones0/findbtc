@@ -50,11 +50,14 @@ unallocated-only. Orphan content with no surviving name is stamped
 
 **FAT** (12/16/32, picked by cluster count) reads the file allocation
 tables plus short and long-name directory entries, including fixed-root
-FAT12/16 volumes. Deletion zeroes the FAT chain and the name's first
-byte, so recovery is an honest prefix: the surviving first cluster is
-scanned and the hit is stamped with the mangled name (`?ELETED.BIN`).
-FAT12's 12-bit packing and odd-cluster entries are covered. The FAT
-itself drives unallocated-only.
+FAT12/16 volumes. Deletion zeroes the FAT chain and stamps 0xE5 over
+the short name's first byte (and usually the LFN sequence bytes), so
+content recovery is an honest prefix: the surviving first cluster is
+scanned. When the LFN slot run survives intact, the hit is stamped with the
+recovered long name; entries with a missing or corrupt run keep the
+mangled 8.3 form (`?ONE.TXT`) — never a guessed first byte. FAT12's 12-bit
+packing and odd-cluster entries are covered. The FAT itself drives
+unallocated-only.
 
 **exFAT** reads the bitmap, the allocation-bitmap entry, and the
 file/stream/name entry sets. Deleted entries keep their full names
