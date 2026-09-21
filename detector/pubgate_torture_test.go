@@ -141,7 +141,7 @@ func TestPubGateTorture(t *testing.T) {
 	keyOf := func(d Detection) string {
 		return fmt.Sprintf("%s/%d/%s", d.Target, d.Offset, d.Needle)
 	}
-	scan := func(cap int64, start int64, cpPath, clPath string, keys map[string]bool) (dets int, err error, log string) {
+	scan := func(cap int64, start int64, cpPath, clPath string, keys map[string]bool) (dets int, log string, err error) {
 		maxOutstandingPubs = cap
 		var lb bytes.Buffer
 		err = ScanWithOptions(start, path, Options{
@@ -155,7 +155,7 @@ func TestPubGateTorture(t *testing.T) {
 				keys[keyOf(d)] = true
 			}
 		}, func(ProgressInfo) {})
-		return dets, err, lb.String()
+		return dets, lb.String(), err
 	}
 	lastCaseStatus := func(t *testing.T, clPath string) string {
 		t.Helper()
@@ -175,7 +175,7 @@ func TestPubGateTorture(t *testing.T) {
 	// fully — nil error, exact detection count (no drops, no
 	// hang), clean case-log completion, and the completion
 	// frontier journaled at exactly the file size.
-	bd, berr, blog := scan(defCap, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"), nil)
+	bd, blog, berr := scan(defCap, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"), nil)
 	if berr != nil {
 		t.Fatalf("baseline scan: %v", berr)
 	}
@@ -211,7 +211,7 @@ func TestPubGateTorture(t *testing.T) {
 	// root reads are sequential full blocks from offset 0.
 	cpPath, clPath := filepath.Join(dir, "cong.cp"), filepath.Join(dir, "cong.log")
 	ckeys := map[string]bool{}
-	cd, cerr, clog := scan(3, 0, cpPath, clPath, ckeys)
+	cd, clog, cerr := scan(3, 0, cpPath, clPath, ckeys)
 	if cerr == nil || !strings.Contains(cerr.Error(), "incomplete coverage") {
 		t.Fatalf("congested scan error = %v, want incomplete-coverage error", cerr)
 	}

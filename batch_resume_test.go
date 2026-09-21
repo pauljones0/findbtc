@@ -582,7 +582,8 @@ func TestBatchResumeRefusals(t *testing.T) {
 			func() { os.WriteFile(journal, []byte("{nope"), 0644) }},
 		{"legacy", []string{"-checkpoint", journal, "-resume", a, b}, "not a batch journal",
 			func() {
-				os.WriteFile(journal, []byte(`{"path":"`+a+`","offset":5,"updated":"2026-01-01T00:00:00Z"}`+"\n"), 0644)
+				pj, _ := json.Marshal(a)
+				os.WriteFile(journal, []byte(`{"path":`+string(pj)+`,"offset":5,"updated":"2026-01-01T00:00:00Z"}`+"\n"), 0644)
 			}},
 		{"length", []string{"-checkpoint", journal, "-resume", a, b, c}, "covers 2 targets, run lists 3", nil},
 		{"order", []string{"-checkpoint", journal, "-resume", b, a}, "run lists", nil},

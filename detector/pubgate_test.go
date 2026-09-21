@@ -179,7 +179,8 @@ func TestPubGateCoverKeyDiscriminatesViews(t *testing.T) {
 	if coverKeyOf(mkEntry(50, 8)) == coverKeyOf(mkEntry(50, 0)) {
 		t.Error("entry cover keys collide across methods")
 	}
-	if coverKeyOf(mkZip(1000)) != coverKeyOf(mkZip(1000)) {
+	za, zb := mkZip(1000), mkZip(1000)
+	if coverKeyOf(za) != coverKeyOf(zb) {
 		t.Error("identical zip members key differently")
 	}
 	// End to end at the gate: banking one view must not defer
@@ -421,7 +422,7 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 	// Nested hits only (Target != path): raw root leaks of the
 	// needle are Go-flate-version-dependent, but the
 	// congested/baseline contract concerns nested members only.
-	scan := func(cap int64, start int64, cpPath, clPath string) (dets int, err error, log string) {
+	scan := func(cap int64, start int64, cpPath, clPath string) (dets int, log string, err error) {
 		maxOutstandingPubs = cap
 		var lb bytes.Buffer
 		err = ScanWithOptions(start, path, Options{
@@ -431,7 +432,7 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 				dets++
 			}
 		}, func(ProgressInfo) {})
-		return dets, err, lb.String()
+		return dets, lb.String(), err
 	}
 	lastCaseStatus := func(t *testing.T, clPath string) string {
 		t.Helper()
@@ -448,7 +449,7 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 	}
 
 	// Baseline: uncongested, full coverage, clean completion.
-	bd, berr, blog := scan(100, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"))
+	bd, blog, berr := scan(100, 0, filepath.Join(dir, "base.cp"), filepath.Join(dir, "base.log"))
 	if berr != nil {
 		t.Fatalf("baseline scan: %v\n%s", berr, blog)
 	}
@@ -461,7 +462,7 @@ func TestPubGateCongestedVsBaseline(t *testing.T) {
 
 	// Congested: partial detections, honest error, frozen journal.
 	cpPath, clPath := filepath.Join(dir, "cong.cp"), filepath.Join(dir, "cong.log")
-	cd, cerr, clog := scan(3, 0, cpPath, clPath)
+	cd, clog, cerr := scan(3, 0, cpPath, clPath)
 	if cerr == nil || !strings.Contains(cerr.Error(), "incomplete coverage") {
 		t.Fatalf("congested scan error = %v, want incomplete-coverage error\n%s", cerr, clog)
 	}
