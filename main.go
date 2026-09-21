@@ -801,7 +801,12 @@ func runUnallocated(path string, fsOffset int64, autoSeed bool, start int64, opt
 		ranges = append(ranges, r)
 		total += r.Len
 	}
-	if len(ranges) == 0 {
+	// A fresh empty run needs no pipeline; a resume must still
+	// validate its existing journal against the current list,
+	// including an empty list (B2's invariant covers every
+	// resume: zero ranges against a nonempty journal is a changed
+	// list and refuses loudly).
+	if len(ranges) == 0 && !opts.Resume {
 		fmt.Fprintln(os.Stderr, "[main] No unallocated space to scan.")
 		return nil
 	}

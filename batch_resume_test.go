@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -629,6 +630,95 @@ func TestCheckpointUnwritableWarns(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "[checkpoint] warning") {
 		t.Errorf("stderr lacks checkpoint warning\n%s", stderr)
+	}
+}
+
+// buildTinyFAT12 writes a minimal valid partitionless FAT12 volume
+// (111 sectors): one live 512-byte file in cluster 2, clusters 3+
+// free. Root-level CLI tests cannot reuse the detector's fixture
+// builders, so the BPB/FAT/rootdir are laid out by hand, mirroring
+// the detector's fat12Geometry constants.
+func buildTinyFAT12(t *testing.T) string {
+	t.Helper()
+	const bps = 512
+	img := make([]byte, 111*bps)
+	img[0], img[1], img[2] = 0xEB, 0x3C, 0x90
+	copy(img[3:], "MSDOS5.0")
+	binary.LittleEndian.PutUint16(img[11:], bps)
+	img[13] = 1
+	binary.LittleEndian.PutUint16(img[14:], 8)
+	img[16] = 2
+	binary.LittleEndian.PutUint16(img[17:], 16)
+	img[21] = 0xF8
+	binary.LittleEndian.PutUint16(img[19:], 111)
+	binary.LittleEndian.PutUint16(img[22:], 1)
+	copy(img[43:], "FINDBTCVOL ")
+	copy(img[54:], "FAT12   ")
+	img[510], img[511] = 0x55, 0xAA
+	putEntry := func(c, val int64) {
+		off := int64(8*bps) + c*3/2
+		prev := int64(img[off]) | int64(img[off+1])<<8
+		var next int64
+		if c%2 == 0 {
+			next = (prev & 0xF000) | (val & 0xFFF)
+		} else {
+			next = (prev & 0x000F) | ((val & 0xFFF) << 4)
+		}
+		img[off] = byte(next)
+		img[off+1] = byte(next >> 8)
+	}
+	putEntry(0, 0xFF8)
+	putEntry(1, 0xFFF)
+	putEntry(2, 0xFFF)
+	root := img[(8+2)*bps:]
+	copy(root, "A       TXT")
+	root[11] = 0x20
+	binary.LittleEndian.PutUint16(root[26:], 2)
+	binary.LittleEndian.PutUint32(root[28:], 512)
+	copy(img[(8+2+1)*bps:], []byte("fat12 live\n"))
+	path := filepath.Join(t.TempDir(), "tiny12.img")
+	if err := os.WriteFile(path, img, 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// An unallocated resume over an emptied range list must validate
+// its journal like every other resume (B2's invariant covers all
+// of them): -s past the end filters the list to zero, and zero
+// against a nonempty journal is a changed list — loud refusal,
+// never a clean "No unallocated space" success. A fresh run over
+// the same empty list keeps the success: no journal contradicts it.
+func TestUnallocatedResumeEmptyListRefuses(t *testing.T) {
+	img := buildTinyFAT12(t)
+	ckpt := filepath.Join(t.TempDir(), "c.json")
+	if _, stderr, exit := runTestBinary(t, "-unallocated-only", "-fs-offset", "0", "-checkpoint", ckpt, img); exit != 0 {
+		t.Fatalf("fresh run exit %d\n%s", exit, stderr)
+	}
+	cp, err := detector.ReadCheckpoint(ckpt)
+	if err != nil || len(cp.Ranges) == 0 {
+		t.Fatalf("fresh run filed no ranges: %+v %v", cp, err)
+	}
+	_, stderr, exit := runTestBinary(t, "-unallocated-only", "-fs-offset", "0", "-checkpoint", ckpt, "-resume", "-s", "99999999", img)
+	if exit == 0 {
+		t.Fatalf("emptied resume exit 0, want range-list mismatch\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "does not match") {
+		t.Fatalf("emptied resume error must name the list mismatch\n%s", stderr)
+	}
+	_, stderr, exit = runTestBinary(t, "-unallocated-only", "-fs-offset", "0", "-s", "99999999", img)
+	if exit != 0 || !strings.Contains(stderr, "No unallocated space") {
+		t.Errorf("fresh-empty run exit %d, want clean no-space success\n%s", exit, stderr)
+	}
+	// No existing journal means the fresh-start policy still
+	// applies over the same empty list: success, no journal.
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	_, stderr, exit = runTestBinary(t, "-unallocated-only", "-fs-offset", "0", "-checkpoint", missing, "-resume", "-s", "99999999", img)
+	if exit != 0 {
+		t.Errorf("missing-journal resume exit %d, want fresh-start success\n%s", exit, stderr)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Errorf("missing-journal resume created a journal: %v", err)
 	}
 }
 
