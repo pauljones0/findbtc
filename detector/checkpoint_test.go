@@ -442,7 +442,12 @@ func TestScanFSVolumesMultiVolumeKillResume(t *testing.T) {
 		}
 		collectFS := func(opts Options) []Detection {
 			var dets []Detection
-			if _, err := ScanFSVolumes(disk, 0, true, opts, stamp(&dets),
+			// Production FileName retained: the union-vs-cold
+			// comparison must prove the resumed production
+			// stamp, not the test's ownership map (which
+			// only the raw prefix scan below needs).
+			if _, err := ScanFSVolumes(disk, 0, true, opts,
+				func(d Detection) { dets = append(dets, d) },
 				func(ProgressInfo) {}, func(string, FSEntry) {}); err != nil {
 				t.Fatalf("%s: fs scan: %v", scheme, err)
 			}
