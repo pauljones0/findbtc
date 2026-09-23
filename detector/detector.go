@@ -2111,12 +2111,8 @@ func scanBlocks(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 		if !alive {
 			return
 		}
-		if !isRoot && outcome.opened {
-			// Banked only once fully read: coverKeyOf() is
-			// stable across resumes of the same input, so
-			// the key re-identifies this member next run.
-			gate.bankCovered(target)
-		}
+		// Nested banking happens inside readTarget, before
+		// the member EOF queues (see pushEOF).
 		if isRoot && opts.strictRoot {
 			// The root promised bytes but yielded none (vanished
 			// mid-run, fully unreadable): that is a failed scan,
@@ -2203,6 +2199,19 @@ func readTarget(ctx context.Context, targets chan scanTarget, emptyBlocks chan *
 	// Every target yields exactly one EOF unless canceled; the
 	// stages' publish/consume balance depends on it.
 	pushEOF := func() bool {
+		// Bank before the EOF queues: downstream EOF proves
+		// delivery, and the error path snapshots banking after
+		// final EOF — so a reported member must already be
+		// banked here, or a retry replays it (exactly-once
+		// violation). Banked only once fully read:
+		// coverKeyOf() is stable across resumes of the same
+		// input, so the key re-identifies this member next
+		// run. Roots never bank; unopened and canceled reads
+		// bank nothing (canceled returns bypass this
+		// closure entirely).
+		if !isRoot && outcome.opened {
+			gate.bankCovered(target)
+		}
 		select {
 		case <-ctx.Done():
 			return false
@@ -2459,13 +2468,12 @@ func drainFrontier(ctx context.Context, targets chan scanTarget, emptyBlocks cha
 				return false
 			case nested := <-targets:
 				gate.consumed()
-				nestedOutcome, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, nested, false)
+				_, alive := readTarget(ctx, targets, emptyBlocks, out, onProgress, opts, jc, gate, nested, false)
 				if !alive {
 					return false
 				}
-				if nestedOutcome.opened {
-					gate.bankCovered(nested)
-				}
+				// Banking happens inside readTarget, before
+				// the member EOF queues (see pushEOF).
 			default:
 				drained = true
 			}
