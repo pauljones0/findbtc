@@ -590,23 +590,18 @@ func TestPubGateBatchJournalStaysActive(t *testing.T) {
 // abort (error plus a non-complete case log) — never on partial
 // coverage certified successful/complete.
 func TestRootPublicationCoverageCaseLog(t *testing.T) {
-	var zb bytes.Buffer
-	w := zip.NewWriter(&zb)
-	for i := 0; i < 10; i++ {
-		fw, err := w.Create("m.dat")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fw.Write([]byte("bestblock")); err != nil {
-			t.Fatal(err)
-		}
+	// Fixture bytes come from the literal-free builder (member
+	// counting assumes the needle is visible only through member
+	// decompression); every assertion below is the frozen 026
+	// receipt verbatim.
+	names := make([]string, 10)
+	for i := range names {
+		names[i] = "m.dat"
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
+	zb := zipBytesWithoutLiteralNeedle(t, names)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "synthetic.zip")
-	if err := os.WriteFile(target, zb.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(target, zb, 0600); err != nil {
 		t.Fatal(err)
 	}
 	old := maxOutstandingPubs
@@ -763,28 +758,59 @@ func TestPublicationBacklogSameCapConverges(t *testing.T) {
 	}
 }
 
+// zipBytesWithoutLiteralNeedle builds a member archive whose raw
+// bytes contain no literal needle, so member content is found only
+// by decompressing members — never by the raw root scan. Required
+// because tiny-payload flate encoding is toolchain-dependent (Go
+// 1.27 stores 9-byte members, adding raw root-level hits that break
+// member counting). Padding grows until the premise holds —
+// deterministic per toolchain — and the test fails loudly if no
+// padding works, instead of silently counting wrong.
+func zipBytesWithoutLiteralNeedle(t *testing.T, names []string) []byte {
+	t.Helper()
+	needle := []byte("bestblock")
+	pads := []int{0}
+	for p := 8; p <= 256; p += 8 {
+		pads = append(pads, p)
+	}
+	pads = append(pads, 512, 1024, 2048, 4096)
+	for _, pad := range pads {
+		var zb bytes.Buffer
+		w := zip.NewWriter(&zb)
+		payload := append([]byte("bestblock"), bytes.Repeat([]byte{0xA5}, pad)...)
+		for _, nm := range names {
+			fw, err := w.Create(nm)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fw.Write(payload); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := w.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Count(zb.Bytes(), needle) == 0 {
+			return zb.Bytes()
+		}
+	}
+	t.Fatal("no padding keeps the needle out of raw archive bytes")
+	return nil
+}
+
 // buildBacklogZip writes ten same-content members under distinct
 // names: identical needles keep counting honest while names keep
 // members distinguishable for coverage assertions.
 func buildBacklogZip(t *testing.T, n int) string {
 	t.Helper()
-	var zb bytes.Buffer
-	w := zip.NewWriter(&zb)
-	for i := 0; i < n; i++ {
-		fw, err := w.Create("m" + string(rune('0'+i)) + ".dat")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fw.Write([]byte("bestblock")); err != nil {
-			t.Fatal(err)
-		}
+	names := make([]string, n)
+	for i := range names {
+		names[i] = "m" + string(rune('0'+i)) + ".dat"
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
+	zb := zipBytesWithoutLiteralNeedle(t, names)
 	dir := t.TempDir()
 	target := filepath.Join(dir, "synthetic.zip")
-	if err := os.WriteFile(target, zb.Bytes(), 0600); err != nil {
+	if err := os.WriteFile(target, zb, 0600); err != nil {
 		t.Fatal(err)
 	}
 	return target
